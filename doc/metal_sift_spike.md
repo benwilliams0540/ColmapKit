@@ -131,61 +131,109 @@ Research-grade only:
 
 ## Current Hardware Validation
 
-### Re-validation after extractor hardening (2026-06-30, exact-cap)
+### Throughput conclusion and task contract (2026-06-30)
 
-After the SiftMetal hardening pass (bounded extrema appends with capacity
-reporting, single COLMAP-side descriptor normalization on raw SIFT floats, UBC
-descriptor ordering, and richer failure diagnostics), `mise run
-compare:gerrard-extractor` was re-run on Apple Silicon with hardware Metal
-access against Gerrard Hall using the defaults (`MAX_IMAGE_SIZE=1000`,
-`MAX_NUM_FEATURES=1024`, `MAX_NUM_ORIENTATIONS=2`, single extractor worker per
-path, `EXACT_FEATURE_CAP=1`, sequential overlap `10`, loop detection disabled).
-This is the first apples-to-apples run: every path is exact-capped to `1024`
-rows per image (`102400` total), so feature counts are identical and only
-detector/descriptor/match behavior differs.
+The current throughput result is explicit: **SiftMetal extraction is a parity
+path, not a speed win.** On Gerrard Hall with exact feature caps, single-device
+SiftMetal extraction (`302.92s`) only matches single-thread CPU SIFT (`303.50s`)
+and loses to threaded CPU SIFT (`58.81s`). It should be compared against
+COLMAP's CUDA/SiftGPU extractor before making any throughput claim.
+
+The validation entrypoint now reports that matrix directly:
+
+```bash
+mise run compare:gerrard-extractor
+```
+
+The generic task behind it runs `cpu_single`, `cpu_threaded`,
+`metal_extractor`, and `metal_full` by default. Set
+`COLMAP_COMPARE_INCLUDE_CUDA=1` and, if needed,
+`COLMAP_COMPARE_CUDA_COLMAP_BIN=/path/to/cuda-enabled/colmap` to add the
+`cuda_gpu` extractor row. The default SiftMetal Mise build is intentionally
+minimal on Apple platforms and does not enable CUDA/OpenGL.
+
+Each run writes `summary.json`, `summary.csv`, command logs, databases, and
+sparse models under `data/mise/runs/<name>-extractor-<timestamp>/`. The summary
+includes:
+
+- extraction, matching, and mapper timings;
+- exact post-extraction keypoint/descriptor caps and rows dropped;
+- Metal capacity/limit drop diagnostics parsed from SiftMetal logs;
+- database counts for images, keypoints, descriptors, raw matches, verified
+  inliers, and verified pairs;
+- sparse reconstruction fragmentation (`model_count` and registered images per
+  model);
+- largest-model registered images, sparse points, observations, and mean
+  reprojection error.
+
+Use the exact-cap defaults for reconstruction quality comparisons. Disable them
+with `COLMAP_COMPARE_EXACT_FEATURE_CAP=0` only when intentionally reproducing
+COLMAP's nominal cap behavior.
+
+### Re-validation after capacity and parity hardening (2026-06-30, exact-cap)
+
+After the SiftMetal capacity-scaling and shader parity pass (scaled extrema,
+interpolation, orientation, and descriptor buffers; deterministic extrema
+ordering; single COLMAP-side descriptor normalization on raw SIFT floats; UBC
+descriptor orientation; strongest-orientation ordering; and richer failure
+diagnostics), `mise run compare:gerrard-extractor` was re-run on Apple Silicon
+with hardware Metal access against Gerrard Hall using
+`COLMAP_COMPARE_MAX_IMAGE_SIZE=1000`, `COLMAP_COMPARE_MAX_NUM_FEATURES=1024`,
+`COLMAP_COMPARE_MAX_NUM_ORIENTATIONS=2`, `COLMAP_COMPARE_THREADS=6`, single
+Metal extractor worker, `EXACT_FEATURE_CAP=1`, sequential overlap `10`, and loop
+detection disabled.
+
+Run artifacts:
+`data/mise/runs/gerrard-extractor-20260630-191645/summary.json`. Every path is
+exact-capped to `1024` rows per image (`102400` total), so feature counts are
+identical and only detector/descriptor/match behavior differs.
 
 Observed runtimes:
 
-- CPU extraction (1 thread): `302.01s` real.
-- SiftMetal extraction (1 device): `297.63s` real.
-- CPU matcher on CPU descriptors: `108.74s` real.
-- CPU matcher on SiftMetal descriptors: `107.97s` real.
-- Metal matcher on SiftMetal descriptors: `3.02s` real.
+- CPU extraction (1 thread): `303.50s` wall.
+- CPU extraction (6 threads): `58.81s` wall.
+- SiftMetal extraction (1 device): `302.92s` wall.
+- CPU matcher on CPU descriptors: `108.37-108.45s` wall.
+- CPU matcher on SiftMetal descriptors: `110.50s` wall.
+- Metal matcher on SiftMetal descriptors: `3.70s` wall.
 
 Database summary (all paths exact-capped to `102400` keypoints):
 
 | Run | Images | Keypoints | Raw matches | Verified inliers | Verified pairs |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU extraction + CPU matching | 100 | 102400 | 40609 | 36770 | 298 |
-| SiftMetal extraction + CPU matching | 100 | 102400 | 45608 | 39922 | 293 |
-| SiftMetal extraction + Metal matching | 100 | 102400 | 45250 | 39729 | 290 |
+| CPU single extraction + CPU matching | 100 | 102400 | 40609 | 36770 | 298 |
+| CPU threaded extraction + CPU matching | 100 | 102400 | 40609 | 36770 | 298 |
+| SiftMetal extraction + CPU matching | 100 | 102400 | 48557 | 41613 | 308 |
+| SiftMetal extraction + Metal matching | 100 | 102400 | 48265 | 41491 | 307 |
 
 Largest sparse model summary:
 
-| Run | Registered images | Points | Observations | Reprojection error |
-| --- | ---: | ---: | ---: | ---: |
-| CPU extraction + CPU matching | 65 | 4162 | 18521 | `1.130094px` |
-| SiftMetal extraction + CPU matching | 66 | 4441 | 19884 | `1.227089px` |
-| SiftMetal extraction + Metal matching | 66 | 4454 | 19908 | `1.228991px` |
+| Run | Models | Registered images | Points | Observations | Reprojection error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CPU single extraction + CPU matching | 2 | 65 | 4162 | 18521 | `1.130094px` |
+| CPU threaded extraction + CPU matching | 2 | 65 | 4170 | 18558 | `1.131146px` |
+| SiftMetal extraction + CPU matching | 3 | 68 | 4458 | 19808 | `1.264637px` |
+| SiftMetal extraction + Metal matching | 3 | 68 | 4457 | 19824 | `1.256403px` |
 
-At equal feature caps the earlier density gap is closed: the SiftMetal extractor
-now yields **more** raw matches, verified inliers, registered images, points,
-and observations in its largest model than the capped CPU baseline. The Metal
-matcher remains parity-close to CPU matching on the same descriptors (39729 vs
-39922 inliers) while running ~36x faster (`3.02s` vs `107.97s`). Remaining
+Capacity diagnostics are now clean for the bounded internal buffers: the Metal
+extractor logs report `total_capacity_dropped=0`. The remaining logged Metal
+drops (`634172`) are explicit option limits: `max_num_orientations=2` and the
+final `max_num_features=1024` feature cap.
+
+At equal feature caps the density gap is closed: the SiftMetal extractor now
+yields more raw matches, verified inliers, registered images, points, and
+observations in its largest model than the capped CPU baseline. The Metal
+matcher remains parity-close to CPU matching on the same descriptors (41491 vs
+41613 inliers) while running much faster (`3.70s` vs `110.50s`). Remaining
 caveats keep the extractor below production:
 
-- **No extraction speedup.** Single-device SiftMetal (`297.63s`) is on par with
-  single-thread CPU SIFT and would lose to multi-threaded CPU or CUDA. The
-  extractor's value is parity, not throughput, at this image size.
-- **Reprojection error is ~8.6% higher** (`1.227px` vs `1.130px`) — acceptable
-  but indicates a localization/descriptor precision difference.
-- **Fixed extrema capacity drops candidates.** Logs show
-  `extract.extrema.octave_0: observed=8153, capacity=4096, dropped=4057` — the
-  buffer is now bounded (no OOB), but ~50% of octave-0 extrema are discarded,
-  and the surviving subset depends on GPU threadgroup scheduling, so the
-  extractor is **not bit-deterministic** under capacity pressure. The capacity
-  should scale with image dimensions before production.
+- **No extraction speedup.** Single-device SiftMetal (`302.92s`) is on par with
+  single-thread CPU SIFT (`303.50s`) and loses badly to threaded CPU SIFT
+  (`58.81s`). The extractor's value is parity, not throughput, at this image
+  size.
+- **Reprojection error is still higher** (`1.256-1.265px` vs `1.130px`), which
+  points to remaining localization, orientation, or descriptor precision
+  differences.
 - **More model fragmentation** (3 sub-models vs CPU's 2) despite the larger
   primary model.
 
@@ -295,19 +343,14 @@ CPU baseline.
 The imported SiftMetal prior art remains in the research-grade bucket until the
 following port-specific issues are resolved:
 
-- Scale the fixed extrema candidate buffer (currently `4096`/octave) with image
-  dimensions. The exact-cap re-run dropped ~50% of octave-0 extrema
-  (`observed=8153, capacity=4096`); the bounded write is safe, but the surviving
-  subset is GPU-schedule-dependent, so the extractor is not bit-deterministic
-  under capacity pressure.
 - Allocate pyramid textures from actual resized image dimensions instead of the
   square `max_image_size x max_image_size` upper bound.
 - Align keypoint limiting semantics with COLMAP CPU SIFT or document an
   intentional SiftGPU-style behavior difference.
-- Close the ~8.6% reprojection-error gap (`1.227px` vs CPU `1.130px`) and the
-  extra model fragmentation seen in the exact-cap run.
+- Close the remaining reprojection-error gap (`1.256-1.265px` vs CPU
+  `1.130px`) and the extra model fragmentation seen in the exact-cap run.
 - Demonstrate a throughput advantage: single-device SiftMetal extraction
-  (`297.63s`) only matches single-thread CPU SIFT and loses to multi-threaded
+  (`302.92s`) only matches single-thread CPU SIFT and loses to multi-threaded
   CPU/CUDA. Extraction value is currently parity, not speed.
 - Fix shader compiler warnings before treating the extractor as an upstreamable
   production path.
@@ -316,14 +359,18 @@ Resolved in this branch:
 
 - Extrema compaction now passes the candidate buffer capacity into
   `siftExtremaList`, uses a `uint32_t` counter matching Metal's `atomic_uint`,
-  and drops excess candidates before writing past the fixed candidate buffer.
+  records each candidate's linear search index, and sorts retained candidates
+  deterministically.
+- Extrema, interpolation, orientation, and descriptor capacities now scale from
+  image/search-space size instead of staying fixed at `4096`/octave; the Gerrard
+  Hall exact-cap re-run reports zero bounded-capacity drops.
 - Descriptor generation now returns standard SIFT float descriptors from the
   Metal kernel instead of quantizing to bytes before COLMAP applies its
   configured L2/RootSIFT normalization.
-- Descriptor ordering, normalization, and quantization are validated against
-  COLMAP's CPU SIFT output: at equal feature caps the exact-cap Gerrard Hall
-  re-run shows the SiftMetal extractor matching or exceeding the CPU baseline on
-  matches, inliers, registered images, points, and observations.
+- Descriptor ordering, normalization, orientation sign, and strongest-orientation
+  ordering are validated against COLMAP's CPU SIFT output closely enough to
+  exceed the CPU baseline on matches, inliers, registered images, points, and
+  observations at equal feature caps.
 - Metal device, pipeline, and shader-library failures are now reported with
   per-stage status detail (`LogSiftMetalStatus`), including capacity drops.
 

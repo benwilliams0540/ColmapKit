@@ -39,6 +39,7 @@ struct MetallibPathAttempt {
 
 struct CapacityStatus {
   int64_t detected_extrema = 0;
+  int64_t extrema_capacity = 0;
   int64_t dropped_extrema = 0;
   int64_t dropped_keypoints = 0;
   int64_t dropped_orientations = 0;

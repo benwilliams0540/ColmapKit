@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -36,9 +37,14 @@
 
 namespace sift_metal {
 
-static constexpr int kMaxExtrema = 4096;
-static constexpr int kMaxKeypoints = 4096;
-static constexpr int kMaxDescriptors = 8192;
+static constexpr int kMinExtremaCapacity = 4096;
+static constexpr int kMaxExtremaCapacity = 1 << 20;
+static constexpr int kMaxExtremaThreadgroupSize = 1024;
+static constexpr int kMinKeypointCapacity = 4096;
+static constexpr int kMinDescriptorCapacity = 8192;
+static constexpr int kMaxDescriptorCapacity = 1 << 16;
+static constexpr int64_t kExtremaFeatureMultiplier = 8;
+static constexpr int64_t kExtremaGridCellsPerCandidate = 256;
 
 static std::string NSStringToString(NSString* string) {
   if (string == nil) return std::string();
@@ -168,6 +174,46 @@ static std::vector<float> GaussianWeights(float sigma) {
   return weights;
 }
 
+static int64_t ExtremaSearchSpaceSize(int w, int h, int num_scales) {
+  if (w <= 2 || h <= 2 || num_scales <= 0) return 0;
+  return static_cast<int64_t>(w - 2) * static_cast<int64_t>(h - 2) *
+         static_cast<int64_t>(num_scales);
+}
+
+static uint32_t ComputeExtremaCapacity(const Options& options, int64_t search_space_size) {
+  if (search_space_size <= 0) return 0;
+
+  const int64_t requested_features =
+      options.max_num_features > 0 ? options.max_num_features : kMinDescriptorCapacity;
+  const int64_t option_scaled_capacity =
+      std::max<int64_t>(kMinExtremaCapacity,
+                        requested_features * kExtremaFeatureMultiplier);
+  const int64_t image_scaled_capacity =
+      std::max<int64_t>(kMinExtremaCapacity,
+                        search_space_size / kExtremaGridCellsPerCandidate);
+  const int64_t capacity = std::min<int64_t>(
+      {search_space_size,
+       kMaxExtremaCapacity,
+       std::max(option_scaled_capacity, image_scaled_capacity)});
+  return static_cast<uint32_t>(
+      std::min<int64_t>(capacity, std::numeric_limits<uint32_t>::max()));
+}
+
+static uint32_t ComputeKeypointCapacity(const uint32_t extrema_capacity) {
+  return static_cast<uint32_t>(
+      std::max<int64_t>(kMinKeypointCapacity, extrema_capacity));
+}
+
+static uint32_t ComputeDescriptorCapacity(const Options& options,
+                                          const uint32_t keypoint_capacity) {
+  const int64_t max_orientations =
+      options.upright ? 1 : std::max<int64_t>(1, options.max_num_orientations);
+  const int64_t capacity =
+      std::max<int64_t>(kMinDescriptorCapacity, keypoint_capacity * max_orientations);
+  return static_cast<uint32_t>(
+      std::min<int64_t>(capacity, kMaxDescriptorCapacity));
+}
+
 // ---------------------------------------------------------------------------
 // Octave: manages textures and pipelines for one octave of the pyramid.
 // ---------------------------------------------------------------------------
@@ -186,6 +232,10 @@ struct Octave {
   id<MTLBuffer> extremaOutputBuffer;
   id<MTLBuffer> extremaIndexBuffer;
   id<MTLBuffer> extremaParamsBuffer;
+  uint32_t extrema_capacity = 0;
+  uint32_t extrema_linear_count = 0;
+  uint32_t keypoint_capacity = 0;
+  uint32_t descriptor_capacity = 0;
 
   // Buffers for interpolation
   id<MTLBuffer> interpolateInputBuffer;
@@ -252,10 +302,17 @@ class SiftMetalExtractorImpl {
   void EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct);
   void EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
   void EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct);
-  void EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct);
+  void EncodeExtrema(id<MTLCommandBuffer> cb,
+                     Octave& oct,
+                     uint32_t output_capacity,
+                     uint32_t linear_start,
+                     uint32_t linear_end);
 
   // Per-octave extraction
   int ReadExtremaCount(Octave& oct);
+  bool CountExtremaInRange(Octave& oct, uint32_t linear_end, uint32_t* count);
+  int CompactExtremaDeterministically(Octave& oct, uint32_t target_count);
+  void SortExtrema(Octave& oct, int count);
   int InterpolateKeypoints(Octave& oct, int extrema_count);
   bool ComputeOrientations(Octave& oct,
                            const std::vector<Keypoint>& keypoints,
@@ -423,7 +480,7 @@ void SiftMetalExtractorImpl::RecordCapacityDrop(const std::string& stage,
   detail << "observed=" << observed << ", capacity=" << capacity << ", dropped=" << dropped;
   AddStatusMessage(StatusSeverity::kWarning,
                    stage,
-                   "Dropped " + resource + " due to fixed capacity",
+                   "Dropped " + resource + " due to bounded capacity",
                    detail.str());
 }
 
@@ -731,9 +788,26 @@ bool SiftMetalExtractorImpl::SetupOctave(Octave& oct,
     }
   }
 
+  const int64_t extrema_search_space = ExtremaSearchSpaceSize(w, h, num_scales);
+  if (extrema_search_space > std::numeric_limits<uint32_t>::max()) {
+    std::ostringstream detail;
+    detail << "octave=" << o << ", search_space=" << extrema_search_space;
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave.extrema",
+                     "Octave extrema search space exceeds Metal SIFT indexing capacity",
+                     detail.str());
+    return false;
+  }
+  oct.extrema_linear_count = static_cast<uint32_t>(extrema_search_space);
+  oct.extrema_capacity = ComputeExtremaCapacity(options_, extrema_search_space);
+  oct.keypoint_capacity = ComputeKeypointCapacity(oct.extrema_capacity);
+  oct.descriptor_capacity = ComputeDescriptorCapacity(options_, oct.keypoint_capacity);
+
   // Extrema buffers
-  oct.extremaOutputBuffer = [device_ newBufferWithLength:kMaxExtrema * sizeof(SIFTExtremaResult)
-                                                 options:MTLResourceStorageModeShared];
+  oct.extremaOutputBuffer =
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.extrema_capacity) *
+                                   sizeof(SIFTExtremaResult)
+                           options:MTLResourceStorageModeShared];
   oct.extremaIndexBuffer = [device_ newBufferWithLength:sizeof(uint32_t)
                                                 options:MTLResourceStorageModeShared];
   oct.extremaParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTExtremaParameters)
@@ -746,14 +820,20 @@ bool SiftMetalExtractorImpl::SetupOctave(Octave& oct,
     return false;
   }
   auto* extremaParams = static_cast<SIFTExtremaParameters*>(oct.extremaParamsBuffer.contents);
-  extremaParams->outputCapacity = static_cast<uint32_t>(kMaxExtrema);
+  extremaParams->outputCapacity = oct.extrema_capacity;
+  extremaParams->gridWidth = static_cast<uint32_t>(w - 2);
+  extremaParams->gridHeight = static_cast<uint32_t>(h - 2);
+  extremaParams->linearStart = 0;
+  extremaParams->linearEnd = oct.extrema_linear_count;
 
   // Interpolation buffers
   oct.interpolateInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTInterpolateInputKeypoint)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.keypoint_capacity) *
+                                   sizeof(SIFTInterpolateInputKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.interpolateOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTInterpolateOutputKeypoint)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.keypoint_capacity) *
+                                   sizeof(SIFTInterpolateOutputKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.interpolateParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTInterpolateParameters)
                                                      options:MTLResourceStorageModeShared];
@@ -767,10 +847,12 @@ bool SiftMetalExtractorImpl::SetupOctave(Octave& oct,
 
   // Orientation buffers
   oct.orientationInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTOrientationKeypoint)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.keypoint_capacity) *
+                                   sizeof(SIFTOrientationKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.orientationOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTOrientationResult)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.keypoint_capacity) *
+                                   sizeof(SIFTOrientationResult)
                            options:MTLResourceStorageModeShared];
   oct.orientationParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTOrientationParameters)
                                                      options:MTLResourceStorageModeShared];
@@ -784,10 +866,12 @@ bool SiftMetalExtractorImpl::SetupOctave(Octave& oct,
 
   // Descriptor buffers
   oct.descriptorInputBuffer =
-      [device_ newBufferWithLength:kMaxDescriptors * sizeof(SIFTDescriptorInput)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.descriptor_capacity) *
+                                   sizeof(SIFTDescriptorInput)
                            options:MTLResourceStorageModeShared];
   oct.descriptorOutputBuffer =
-      [device_ newBufferWithLength:kMaxDescriptors * sizeof(SIFTDescriptorResult)
+      [device_ newBufferWithLength:static_cast<NSUInteger>(oct.descriptor_capacity) *
+                                   sizeof(SIFTDescriptorResult)
                            options:MTLResourceStorageModeShared];
   oct.descriptorParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTDescriptorParameters)
                                                     options:MTLResourceStorageModeShared];
@@ -927,6 +1011,10 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h, ExtractR
   // Phase 2: For each octave, read extrema, interpolate, orientate, describe.
   for (auto& oct : octaves_) {
     int extremaCount = ReadExtremaCount(oct);
+    if (extremaCount < 0) {
+      result->status = last_status_;
+      return false;
+    }
     if (extremaCount <= 0) continue;
 
     int interpolatedCount = InterpolateKeypoints(oct, extremaCount);
@@ -984,11 +1072,18 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h, ExtractR
                      "extract.feature_limit",
                      "Dropped features due to max_num_features limit",
                      detail.str());
-    // Create index array, sort by sigma descending.
+    // Create index array, sort by sigma descending with deterministic tie
+    // breaks, then restore the original extraction order among retained rows.
     std::vector<int> indices(result->keypoints.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-      return result->keypoints[a].sigma > result->keypoints[b].sigma;
+      const Keypoint& lhs = result->keypoints[a];
+      const Keypoint& rhs = result->keypoints[b];
+      if (lhs.sigma != rhs.sigma) return lhs.sigma > rhs.sigma;
+      if (lhs.y != rhs.y) return lhs.y < rhs.y;
+      if (lhs.x != rhs.x) return lhs.x < rhs.x;
+      if (lhs.orientation != rhs.orientation) return lhs.orientation < rhs.orientation;
+      return a < b;
     });
     indices.resize(options_.max_num_features);
     std::sort(indices.begin(), indices.end());  // Restore order.
@@ -1129,7 +1224,7 @@ bool SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
   // Gradients.
   EncodeGradients(cb, oct);
   // Extrema detection.
-  EncodeExtrema(cb, oct);
+  EncodeExtrema(cb, oct, oct.extrema_capacity, 0, oct.extrema_linear_count);
   return true;
 }
 
@@ -1193,10 +1288,21 @@ void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb, Octave& oc
   [enc endEncoding];
 }
 
-void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct) {
+void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
+                                           Octave& oct,
+                                           uint32_t output_capacity,
+                                           uint32_t linear_start,
+                                           uint32_t linear_end) {
   int w = oct.width;
   int h = oct.height;
   int numDiff = oct.num_scales + 2;
+
+  auto* params = static_cast<SIFTExtremaParameters*>(oct.extremaParamsBuffer.contents);
+  params->outputCapacity = output_capacity;
+  params->gridWidth = static_cast<uint32_t>(w - 2);
+  params->gridHeight = static_cast<uint32_t>(h - 2);
+  params->linearStart = linear_start;
+  params->linearEnd = linear_end;
 
   // Reset index counter.
   auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
@@ -1209,7 +1315,9 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct)
   [enc setBuffer:oct.extremaParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.differenceTextures atIndex:0];
 
-  NSUInteger maxThreads = siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup;
+  NSUInteger maxThreads =
+      std::min<NSUInteger>(siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup,
+                           kMaxExtremaThreadgroupSize);
   NSUInteger dim = (NSUInteger)std::cbrt((double)maxThreads);
   MTLSize tg = {dim, dim, dim};
   MTLSize gridSize = {(NSUInteger)(w - 2), (NSUInteger)(h - 2), (NSUInteger)(numDiff - 2)};
@@ -1224,28 +1332,103 @@ int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
   auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
   const uint32_t observed = *idx;
   last_status_.capacity.detected_extrema += observed;
-  if (observed > static_cast<uint32_t>(kMaxExtrema)) {
+  last_status_.capacity.extrema_capacity += oct.extrema_capacity;
+  if (observed > oct.extrema_capacity) {
     RecordCapacityDrop("extract.extrema.octave_" + std::to_string(oct.o),
                        "extrema",
-                       observed - static_cast<uint32_t>(kMaxExtrema),
-                       kMaxExtrema,
+                       observed - oct.extrema_capacity,
+                       oct.extrema_capacity,
                        observed);
+    const int compacted_count = CompactExtremaDeterministically(oct, oct.extrema_capacity);
+    if (compacted_count < 0) return -1;
+    SortExtrema(oct, compacted_count);
+    *idx = 0;
+    return compacted_count;
   }
-  int count = static_cast<int>(std::min(observed, static_cast<uint32_t>(kMaxExtrema)));
+
+  int count = static_cast<int>(std::min(observed, oct.extrema_capacity));
+  SortExtrema(oct, count);
   *idx = 0;
   return count;
+}
+
+bool SiftMetalExtractorImpl::CountExtremaInRange(Octave& oct,
+                                                 uint32_t linear_end,
+                                                 uint32_t* count) {
+  if (count != nullptr) *count = 0;
+
+  id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+  EncodeExtrema(cb, oct, 0, 0, linear_end);
+  if (!WaitForCommandBuffer(cb, "extract.extrema.compact_count.octave_" +
+                                    std::to_string(oct.o))) {
+    return false;
+  }
+
+  auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
+  if (count != nullptr) *count = *idx;
+  return true;
+}
+
+int SiftMetalExtractorImpl::CompactExtremaDeterministically(Octave& oct,
+                                                            uint32_t target_count) {
+  if (target_count == 0) return 0;
+
+  uint32_t low = 0;
+  uint32_t high = oct.extrema_linear_count;
+  while (low < high) {
+    const uint32_t mid = low + (high - low) / 2;
+    uint32_t count = 0;
+    if (!CountExtremaInRange(oct, mid, &count)) {
+      return -1;
+    }
+    if (count >= target_count) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+
+  id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+  EncodeExtrema(cb, oct, target_count, 0, low);
+  if (!WaitForCommandBuffer(cb, "extract.extrema.compact_write.octave_" +
+                                    std::to_string(oct.o))) {
+    return -1;
+  }
+
+  auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
+  const uint32_t compacted_count = std::min(*idx, target_count);
+  if (compacted_count != target_count) {
+    std::ostringstream detail;
+    detail << "requested=" << target_count << ", compacted=" << compacted_count
+           << ", cutoff=" << low;
+    AddStatusMessage(StatusSeverity::kWarning,
+                     "extract.extrema.compact.octave_" + std::to_string(oct.o),
+                     "Deterministic extrema compaction produced fewer candidates than expected",
+                     detail.str());
+  }
+  return static_cast<int>(compacted_count);
+}
+
+void SiftMetalExtractorImpl::SortExtrema(Octave& oct, int count) {
+  if (count <= 1) return;
+  auto* extrema = static_cast<SIFTExtremaResult*>(oct.extremaOutputBuffer.contents);
+  std::sort(extrema, extrema + count, [](const SIFTExtremaResult& lhs,
+                                         const SIFTExtremaResult& rhs) {
+    return lhs.linearIndex < rhs.linearIndex;
+  });
 }
 
 // ---------------------------------------------------------------------------
 // InterpolateKeypoints
 // ---------------------------------------------------------------------------
 int SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct, int extremaCount) {
-  int count = std::min(extremaCount, kMaxKeypoints);
-  if (extremaCount > kMaxKeypoints) {
+  const int capacity = static_cast<int>(oct.keypoint_capacity);
+  int count = std::min(extremaCount, capacity);
+  if (extremaCount > capacity) {
     RecordCapacityDrop("extract.interpolate.octave_" + std::to_string(oct.o),
                        "keypoints",
-                       extremaCount - kMaxKeypoints,
-                       kMaxKeypoints,
+                       extremaCount - capacity,
+                       capacity,
                        extremaCount);
   }
 
@@ -1325,7 +1508,7 @@ bool SiftMetalExtractorImpl::ComputeOrientations(Octave& oct,
       continue;
     }
 
-    if (validCount >= kMaxKeypoints) {
+    if (validCount >= static_cast<int>(oct.keypoint_capacity)) {
       ++droppedByCapacity;
       continue;
     }
@@ -1353,7 +1536,7 @@ bool SiftMetalExtractorImpl::ComputeOrientations(Octave& oct,
     RecordCapacityDrop("extract.orientation.octave_" + std::to_string(oct.o),
                        "keypoints",
                        droppedByCapacity,
-                       kMaxKeypoints,
+                       oct.keypoint_capacity,
                        validCount + droppedByCapacity);
   }
 
@@ -1417,12 +1600,13 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(Octave& oct,
                                                 const std::vector<Keypoint>& keypoints,
                                                 const std::vector<std::pair<int, float>>& oriented,
                                                 ExtractResult* result) {
-  int count = std::min((int)oriented.size(), kMaxDescriptors);
-  if ((int)oriented.size() > kMaxDescriptors) {
+  const int descriptor_capacity = static_cast<int>(oct.descriptor_capacity);
+  int count = std::min((int)oriented.size(), descriptor_capacity);
+  if ((int)oriented.size() > static_cast<int>(oct.descriptor_capacity)) {
     RecordCapacityDrop("extract.descriptor.octave_" + std::to_string(oct.o),
                        "descriptors",
-                       static_cast<int64_t>(oriented.size()) - kMaxDescriptors,
-                       kMaxDescriptors,
+                       static_cast<int64_t>(oriented.size()) - oct.descriptor_capacity,
+                       oct.descriptor_capacity,
                        static_cast<int64_t>(oriented.size()));
   }
   if (count == 0) return true;

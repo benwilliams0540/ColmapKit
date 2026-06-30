@@ -53,6 +53,18 @@ void copyFeatures(
 }
 
     
+float wrapAngle(float angle) {
+    const float tau = 2 * M_PI_F;
+    while (angle < 0) {
+        angle += tau;
+    }
+    while (angle >= tau) {
+        angle -= tau;
+    }
+    return angle;
+}
+
+
 int offset(int x, int y, int b) {
     const int side = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH;
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
@@ -143,8 +155,10 @@ kernel void siftDescriptors(
     // let delta = octave.delta
     // let lambda = configuration.lambdaDescriptor
     // let a = keypoint.absoluteCoordinate
-    float px = float(input.absoluteX) / parameters.delta;
-    float py = float(input.absoluteY) / parameters.delta;
+    const float px = float(input.absoluteX) / parameters.delta;
+    const float py = float(input.absoluteY) / parameters.delta;
+    const int xi = int(floor(px + 0.5));
+    const int yi = int(floor(py + 0.5));
 
     const int d = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH;
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
@@ -161,12 +175,8 @@ kernel void siftDescriptors(
     // let _sigma = keypoint.sigma / octave.delta // identical to above
     const float histogramWidth = 3.0 * scale; // 3.0 constant from Whess (OpenSIFT)
     const int radius = histogramWidth * sqrt(2.0) * ((float)d + 1.0) * 0.5 + 0.5;
-    
-    const float minX = (float)radius;
-    const float minY = (float)radius;
-    const float maxX = (float)(parameters.width - 1 - radius);
-    const float maxY = (float)(parameters.height - 1 - radius);
-    if (px < minX || py < minY || px > maxX || py > maxY) {
+
+    if (xi < 0 || xi >= parameters.width || yi < 0 || yi >= parameters.height - 1) {
         results[gid] = result;
         return;
     }
@@ -179,23 +189,24 @@ kernel void siftDescriptors(
         features[i] = 0;
     }
 
-    for (int j = -radius; j <= +radius; j++) {
-        for (int i = -radius; i <= +radius; i++) {
+    const int minX = max(-radius, 1 - xi);
+    const int maxX = min(+radius, parameters.width - xi - 2);
+    const int minY = max(-radius, 1 - yi);
+    const int maxY = min(+radius, parameters.height - yi - 2);
 
-            float rx = ((float)j * cosT - (float)i * sinT) / histogramWidth;
-            float ry = ((float)j * sinT + (float)i * cosT) / histogramWidth;
+    for (int dy = minY; dy <= maxY; dy++) {
+        for (int dx = minX; dx <= maxX; dx++) {
+
+            const float sampleX = float(xi + dx) - px;
+            const float sampleY = float(yi + dy) - py;
+            float rx = (sampleX * cosT + sampleY * sinT) / histogramWidth;
+            float ry = (-sampleX * sinT + sampleY * cosT) / histogramWidth;
             float bx = rx + (float)(d / 2) - 0.5;
             float by = ry + (float)(d / 2) - 0.5;
             
-            float2 g = gradientTextures.read(ushort2(px + j, py + i), input.scale).rg;
-            float orientation = g.r - input.theta;
+            float2 g = gradientTextures.read(ushort2(xi + dx, yi + dy), input.scale).rg;
+            float orientation = wrapAngle(input.theta - g.r);
             float magnitude = g.g;
-            while (orientation < 0) {
-                orientation += tau;
-            }
-            while (orientation >= tau) {
-                orientation -= tau;
-            }
 
             // Bin
             float bin = orientation * binsPerRadian;

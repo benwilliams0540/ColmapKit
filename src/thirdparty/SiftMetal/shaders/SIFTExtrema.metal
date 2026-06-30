@@ -78,25 +78,35 @@ kernel void siftExtremaList(
     
     const int2 g = (int2)gid.xy + 1;
     const int s = (int)gid.z + 1;
-    const float value = inputTexture.read((ushort2)g, (ushort)s).r;
-    
-    float minimum = +INFINITY;
-    float maximum = -INFINITY;
+    const uint linearIndex =
+        (((uint)gid.z * parameters.gridHeight) + (uint)gid.y) *
+            parameters.gridWidth +
+        (uint)gid.x;
+    const bool inRange =
+        linearIndex >= parameters.linearStart && linearIndex < parameters.linearEnd;
 
-    for (int i = 0; i < 26; i++) {
-        float neighborValue = fetch(inputTexture, g, s, i);
-        minimum = min(minimum, neighborValue);
-        maximum = max(maximum, neighborValue);
-    }
+    if (inRange) {
+        const float value = inputTexture.read((ushort2)g, (ushort)s).r;
 
-    if ((value < minimum) || (value > maximum)) {
-        const uint i = atomic_fetch_add_explicit(&localCount, 1u, memory_order_relaxed);
-        if (i < kMaxThreadgroupExtrema) {
-            SIFTExtremaResult result;
-            result.x = g.x;
-            result.y = g.y;
-            result.scale = s;
-            localResults[i] = result;
+        float minimum = +INFINITY;
+        float maximum = -INFINITY;
+
+        for (int i = 0; i < 26; i++) {
+            float neighborValue = fetch(inputTexture, g, s, i);
+            minimum = min(minimum, neighborValue);
+            maximum = max(maximum, neighborValue);
+        }
+
+        if ((value < minimum) || (value > maximum)) {
+            const uint i = atomic_fetch_add_explicit(&localCount, 1u, memory_order_relaxed);
+            if (i < kMaxThreadgroupExtrema) {
+                SIFTExtremaResult result;
+                result.x = g.x;
+                result.y = g.y;
+                result.scale = s;
+                result.linearIndex = linearIndex;
+                localResults[i] = result;
+            }
         }
     }
     

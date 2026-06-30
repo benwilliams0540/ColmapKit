@@ -431,173 +431,68 @@ done
 '''
 
 [tasks."compare:extractor"]
-description = "Compare CPU extraction, Metal extraction, and full Metal extraction+matching on an image folder."
+description = "Compare CPU single-thread, CPU threaded, optional CUDA/SiftGPU, and Metal SIFT throughput plus sparse metrics."
 depends = ["build:sift-metal"]
 run = '''
 set -eu
 COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
 : "${COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR:?Set COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR}"
-colmap_bin="$COLMAP_SIFT_METAL_BUILD_DIR/src/colmap/exe/colmap"
+colmap_bin="${COLMAP_EXTRACTOR_COMPARE_COLMAP_BIN:-$COLMAP_SIFT_METAL_BUILD_DIR/src/colmap/exe/colmap}"
 image_dir="$COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR"
 name="${COLMAP_EXTRACTOR_COMPARE_NAME:-extractor}"
 run_dir="$COLMAP_DATA_DIR/runs/${name}-extractor-$(date +%Y%m%d-%H%M%S)"
 threads="${COLMAP_COMPARE_THREADS:-6}"
-extract_threads="${COLMAP_COMPARE_EXTRACT_THREADS:-1}"
-cpu_extract_threads="${COLMAP_COMPARE_CPU_EXTRACT_THREADS:-$extract_threads}"
-metal_extract_threads="${COLMAP_COMPARE_METAL_EXTRACT_THREADS:-$extract_threads}"
+single_cpu_threads="${COLMAP_COMPARE_CPU_SINGLE_THREADS:-1}"
+threaded_cpu_threads="${COLMAP_COMPARE_CPU_THREADS:-$threads}"
+cuda_threads="${COLMAP_COMPARE_CUDA_THREADS:-1}"
+metal_extract_threads="${COLMAP_COMPARE_METAL_EXTRACT_THREADS:-1}"
 mapper_threads="${COLMAP_COMPARE_MAPPER_THREADS:-$threads}"
+matcher_threads="${COLMAP_COMPARE_MATCHER_THREADS:-1}"
 max_image_size="${COLMAP_COMPARE_MAX_IMAGE_SIZE:-1000}"
 max_num_features="${COLMAP_COMPARE_MAX_NUM_FEATURES:-1024}"
 max_num_orientations="${COLMAP_COMPARE_MAX_NUM_ORIENTATIONS:-2}"
 exact_feature_cap="${COLMAP_COMPARE_EXACT_FEATURE_CAP:-1}"
-cpu_db="$run_dir/cpu_full.db"
-metal_extractor_db="$run_dir/metal_extractor_only.db"
-metal_full_db="$run_dir/metal_full.db"
 
-mkdir -p "$run_dir/cpu_sparse" "$run_dir/metal_extractor_sparse" "$run_dir/metal_full_sparse"
+set -- python scripts/python/metal_sift_compare.py \
+  --colmap-bin "$colmap_bin" \
+  --image-dir "$image_dir" \
+  --run-dir "$run_dir" \
+  --single-cpu-threads "$single_cpu_threads" \
+  --threaded-cpu-threads "$threaded_cpu_threads" \
+  --cuda-threads "$cuda_threads" \
+  --metal-threads "$metal_extract_threads" \
+  --mapper-threads "$mapper_threads" \
+  --matcher-threads "$matcher_threads" \
+  --max-image-size "$max_image_size" \
+  --max-num-features "$max_num_features" \
+  --max-num-orientations "$max_num_orientations" \
+  --overlap "${COLMAP_COMPARE_OVERLAP:-10}"
 
-cap_feature_rows() {
-  db_path="$1"
-  feature_cap="$2"
-  if [ "$exact_feature_cap" != "1" ]; then
-    return 0
-  fi
-  python - "$db_path" "$feature_cap" <<'PY'
-import sqlite3
-import sys
+if [ "$exact_feature_cap" = "1" ]; then
+  set -- "$@" --exact-feature-cap
+else
+  set -- "$@" --no-exact-feature-cap
+fi
 
-db_path = sys.argv[1]
-feature_cap = int(sys.argv[2])
+if [ -n "${COLMAP_COMPARE_IMAGE_LIST_PATH:-}" ]; then
+  set -- "$@" --image-list-path "$COLMAP_COMPARE_IMAGE_LIST_PATH"
+fi
 
-con = sqlite3.connect(db_path)
-cur = con.cursor()
+if [ "${COLMAP_COMPARE_INCLUDE_CUDA:-0}" = "1" ] || [ -n "${COLMAP_COMPARE_CUDA_COLMAP_BIN:-}" ]; then
+  set -- "$@" --include-cuda
+fi
+if [ -n "${COLMAP_COMPARE_CUDA_COLMAP_BIN:-}" ]; then
+  set -- "$@" --cuda-colmap-bin "$COLMAP_COMPARE_CUDA_COLMAP_BIN"
+fi
+if [ -n "${COLMAP_COMPARE_CUDA_GPU_INDEX:-}" ]; then
+  set -- "$@" --cuda-gpu-index "$COLMAP_COMPARE_CUDA_GPU_INDEX"
+fi
 
-updated_images = set()
-for table in ("keypoints", "descriptors"):
-    rows = cur.execute(
-        f"select image_id, rows, data from {table} where rows > ?",
-        (feature_cap,),
-    ).fetchall()
-    for image_id, num_rows, data in rows:
-        if data is None or num_rows <= 0:
-            continue
-        bytes_per_row = len(data) // num_rows
-        cur.execute(
-            f"update {table} set rows = ?, data = ? where image_id = ?",
-            (feature_cap, data[: feature_cap * bytes_per_row], image_id),
-        )
-        updated_images.add(image_id)
-
-con.commit()
-con.close()
-
-if updated_images:
-    print(
-        f"Exact-capped {len(updated_images)} images in {db_path} "
-        f"to {feature_cap} feature rows"
-    )
-PY
-}
-
-/usr/bin/time -p "$colmap_bin" feature_extractor \
-  --database_path "$cpu_db" \
-  --image_path "$image_dir" \
-  --ImageReader.single_camera 1 \
-  --FeatureExtraction.use_gpu 0 \
-  --FeatureExtraction.max_image_size "$max_image_size" \
-  --FeatureExtraction.num_threads "$cpu_extract_threads" \
-  --SiftExtraction.max_num_features "$max_num_features" \
-  --SiftExtraction.max_num_orientations "$max_num_orientations"
-cap_feature_rows "$cpu_db" "$max_num_features"
-
-/usr/bin/time -p "$colmap_bin" feature_extractor \
-  --database_path "$metal_extractor_db" \
-  --image_path "$image_dir" \
-  --ImageReader.single_camera 1 \
-  --FeatureExtraction.use_gpu 1 \
-  --SiftExtraction.use_metal 1 \
-  --FeatureExtraction.max_image_size "$max_image_size" \
-  --FeatureExtraction.num_threads "$metal_extract_threads" \
-  --SiftExtraction.max_num_features "$max_num_features" \
-  --SiftExtraction.max_num_orientations "$max_num_orientations"
-cap_feature_rows "$metal_extractor_db" "$max_num_features"
-
-cp "$metal_extractor_db" "$metal_full_db"
-
-/usr/bin/time -p "$colmap_bin" sequential_matcher \
-  --database_path "$cpu_db" \
-  --FeatureMatching.use_gpu 0 \
-  --SiftMatching.cpu_brute_force_matcher 1 \
-  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
-  --SequentialMatching.loop_detection 0 \
-  --FeatureMatching.num_threads 1
-
-/usr/bin/time -p "$colmap_bin" sequential_matcher \
-  --database_path "$metal_extractor_db" \
-  --FeatureMatching.use_gpu 0 \
-  --SiftMatching.cpu_brute_force_matcher 1 \
-  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
-  --SequentialMatching.loop_detection 0 \
-  --FeatureMatching.num_threads 1
-
-/usr/bin/time -p "$colmap_bin" sequential_matcher \
-  --database_path "$metal_full_db" \
-  --FeatureMatching.use_gpu 1 \
-  --SiftMatching.use_metal 1 \
-  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
-  --SequentialMatching.loop_detection 0 \
-  --FeatureMatching.num_threads 1
-
-/usr/bin/time -p "$colmap_bin" mapper \
-  --database_path "$cpu_db" \
-  --image_path "$image_dir" \
-  --output_path "$run_dir/cpu_sparse" \
-  --Mapper.num_threads "$mapper_threads"
-
-/usr/bin/time -p "$colmap_bin" mapper \
-  --database_path "$metal_extractor_db" \
-  --image_path "$image_dir" \
-  --output_path "$run_dir/metal_extractor_sparse" \
-  --Mapper.num_threads "$mapper_threads"
-
-/usr/bin/time -p "$colmap_bin" mapper \
-  --database_path "$metal_full_db" \
-  --image_path "$image_dir" \
-  --output_path "$run_dir/metal_full_sparse" \
-  --Mapper.num_threads "$mapper_threads"
-
-python - "$cpu_db" "$metal_extractor_db" "$metal_full_db" <<'PY'
-import sqlite3
-import sys
-
-labels = ("cpu_full", "metal_extractor_only", "metal_full")
-for label, db_path in zip(labels, sys.argv[1:]):
-    con = sqlite3.connect(db_path)
-    cur = con.cursor()
-    images = cur.execute("select count(*) from images").fetchone()[0]
-    keypoints = cur.execute("select coalesce(sum(rows), 0) from keypoints").fetchone()[0]
-    descriptors = cur.execute("select coalesce(sum(rows), 0) from descriptors").fetchone()[0]
-    raw = cur.execute("select coalesce(sum(rows), 0), count(*) from matches where rows > 0").fetchone()
-    verified = cur.execute("select coalesce(sum(rows), 0), count(*) from two_view_geometries where rows > 0").fetchone()
-    con.close()
-    print(
-        f"{label}: images={images} keypoints={keypoints} descriptors={descriptors} "
-        f"raw_matches={raw[0]} raw_pairs={raw[1]} "
-        f"verified_inliers={verified[0]} verified_pairs={verified[1]}"
-    )
-PY
-
-printf 'Extractor comparison output: %s\n' "$run_dir"
-for model_dir in "$run_dir"/cpu_sparse/* "$run_dir"/metal_extractor_sparse/* "$run_dir"/metal_full_sparse/*; do
-  if [ -d "$model_dir" ]; then
-    printf '\n== %s ==\n' "$model_dir"
-    "$colmap_bin" model_analyzer --path "$model_dir" || true
-  fi
-done
+"$@"
 '''
 
 [tasks."compare:gerrard-extractor"]
-description = "Run the extractor-isolated Metal comparison on Gerrard Hall."
+description = "Run the Gerrard Hall SIFT throughput/parity comparison."
 depends = ["data:gerrard"]
 run = '''
 set -eu
@@ -608,7 +503,7 @@ mise run compare:extractor
 '''
 
 [tasks."compare:frames:extractor"]
-description = "Run the extractor-isolated Metal comparison on COLMAP_FRAMES_DIR."
+description = "Run the SIFT throughput/parity comparison on COLMAP_FRAMES_DIR."
 run = '''
 set -eu
 : "${COLMAP_FRAMES_DIR:?Set COLMAP_FRAMES_DIR to a folder of frames}"

@@ -49,6 +49,37 @@ float interpolatePeak(float h1, float h2, float h3) {
     }
     return (h1 - h3) / denominator;
 }
+
+
+void insertPrincipalOrientation(
+    float orientation,
+    float weight,
+    thread int & orientationsCount,
+    thread float * orientations,
+    thread float * orientationWeights
+) {
+    int insertIndex = orientationsCount;
+    while (insertIndex > 0 &&
+           (weight > orientationWeights[insertIndex - 1] ||
+            (weight == orientationWeights[insertIndex - 1] &&
+             orientation < orientations[insertIndex - 1]))) {
+        insertIndex -= 1;
+    }
+
+    if (insertIndex >= kMaxPrincipalOrientations) {
+        return;
+    }
+
+    const int lastIndex = min(orientationsCount, kMaxPrincipalOrientations - 1);
+    for (int i = lastIndex; i > insertIndex; i--) {
+        orientations[i] = orientations[i - 1];
+        orientationWeights[i] = orientationWeights[i - 1];
+    }
+
+    orientations[insertIndex] = orientation;
+    orientationWeights[insertIndex] = weight;
+    orientationsCount = min(orientationsCount + 1, kMaxPrincipalOrientations);
+}
     
     
 void getPrincipalOrientations(
@@ -67,6 +98,10 @@ void getPrincipalOrientations(
     const float threshold = orientationThreshold * maximum;
     
     orientationsCount = 0;
+    float orientationWeights[kMaxPrincipalOrientations];
+    for (int i = 0; i < kMaxPrincipalOrientations; i++) {
+        orientationWeights[i] = 0;
+    }
     
     for (int i = 0; i < bins; i++) {
         float hm = histogram[((i - 1) + bins) % bins];
@@ -75,11 +110,13 @@ void getPrincipalOrientations(
         if ((h0 > threshold) && (h0 > hm) && (h0 > hp)) {
             float offset = interpolatePeak(hm, h0, hp);
             float orientation = orientationFromBin((float)i + offset);
-            orientations[orientationsCount] = orientation;
-            orientationsCount += 1;
-            if (orientationsCount == kMaxPrincipalOrientations) {
-                return;
-            }
+            insertPrincipalOrientation(
+                orientation,
+                h0,
+                orientationsCount,
+                orientations,
+                orientationWeights
+            );
         }
     }
 }
