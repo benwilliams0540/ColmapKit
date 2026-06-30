@@ -38,6 +38,8 @@ option(SIMD_ENABLED "Whether to enable SIMD optimizations" ON)
 option(OPENMP_ENABLED "Whether to enable OpenMP parallelization" ON)
 option(IPO_ENABLED "Whether to enable interprocedural optimization" ON)
 option(CUDA_ENABLED "Whether to enable CUDA, if available" ON)
+option(METAL_ENABLED "Whether to enable Apple Metal feature matching, if available" OFF)
+option(SIFT_METAL_ENABLED "Whether to enable experimental Apple Metal SIFT extraction, if available" OFF)
 option(ONNX_ENABLED "Whether to enable ONNX, if available" ON)
 option(GUI_ENABLED "Whether to enable the graphical UI" ON)
 option(MVS_ENABLED "Whether to enable the Multi-View Stereo module" ON)
@@ -96,7 +98,15 @@ if(DOWNLOAD_ENABLED)
     list(APPEND VCPKG_MANIFEST_FEATURES "download")
 endif()
 
-project(COLMAP LANGUAGES C CXX)
+if(SIFT_METAL_ENABLED AND NOT METAL_ENABLED)
+    set(METAL_ENABLED ON CACHE BOOL "Whether to enable Apple Metal feature matching, if available" FORCE)
+endif()
+
+if(APPLE AND METAL_ENABLED)
+    project(COLMAP LANGUAGES C CXX OBJCXX)
+else()
+    project(COLMAP LANGUAGES C CXX)
+endif()
 
 set(COLMAP_VERSION "4.2.0.dev0")
 
@@ -104,6 +114,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(APPLE AND METAL_ENABLED)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 
 set_property(GLOBAL PROPERTY GLOBAL_DEPENDS_NO_CYCLES ON)
 
@@ -451,6 +465,11 @@ endif()
 if(GPU_ENABLED)
     list(APPEND COLMAP_EXPORT_LIBS
          colmap_sift_gpu
+    )
+endif()
+if(SIFT_METAL_ENABLED)
+    list(APPEND COLMAP_EXPORT_LIBS
+         colmap_sift_metal
     )
 endif()
 if(FETCH_POSELIB)

@@ -114,6 +114,7 @@ SIFTExtractionWidget::SIFTExtractionWidget(QWidget* parent,
                 "sift.estimate_affine_shape");
   AddOptionInt(&sift_options.max_num_orientations, "sift.max_num_orientations");
   AddOptionBool(&sift_options.upright, "sift.upright");
+  AddOptionBool(&sift_options.use_metal, "sift.use_metal");
   AddOptionBool(&sift_options.domain_size_pooling, "sift.domain_size_pooling");
   AddOptionDouble(
       &sift_options.dsp_min_scale, "sift.dsp_min_scale", 0.0, 1e7, 0.00001, 5);

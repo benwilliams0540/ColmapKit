@@ -71,6 +71,10 @@ struct SiftExtractionOptions {
   // Note that this feature is only available in the OpenGL SiftGPU version.
   bool darkness_adaptivity = false;
 
+  // Whether to use the Apple Metal SIFT extractor when GPU extraction is
+  // enabled. Unsupported SIFT modes fall back to the CPU extractor.
+  bool use_metal = false;
+
   // Domain-size pooling parameters. Domain-size pooling computes an average
   // SIFT descriptor across multiple scales around the detected scale. This was
   // proposed in "Domain-Size Pooling in Local Descriptors and Network
@@ -121,6 +125,10 @@ struct SiftMatchingOptions {
 
   // Whether to use brute-force instead of faiss based CPU matching.
   bool cpu_brute_force_matcher = false;
+
+  // Whether to use the Apple Metal descriptor matcher for SIFT brute-force
+  // matching. Guided matching currently falls back to the CPU brute-force path.
+  bool use_metal = false;
 
   // Cache for reusing descriptor index for feature matching.
   ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>*

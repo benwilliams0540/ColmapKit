@@ -1,0 +1,626 @@
+# Mise is the workflow entrypoint for this project. Native tool installation is
+# kept explicit through tasks such as `deps:macos` so normal build/test commands
+# do not resolve or download tools at runtime.
+
+[env]
+COLMAP_CPU_BUILD_DIR = "build-mise-cpu"
+COLMAP_METAL_BUILD_DIR = "build-mise-metal"
+COLMAP_SIFT_METAL_BUILD_DIR = "build-mise-sift-metal"
+COLMAP_METAL_TEST_BUILD_DIR = "build-mise-metal-tests"
+COLMAP_METAL_INSTALL_DIR = "install-mise-metal"
+COLMAP_BUILD_TARGET = "colmap_main"
+
+[tasks.doctor]
+description = "Check the local toolchain expected by the COLMAP Metal workflow."
+run = '''
+set -eu
+printf 'cmake: '; cmake --version | head -n 1
+printf 'ninja: '; ninja --version
+printf 'python: '; python --version
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  find_developer_tool() {
+    tool_name="$1"
+    if tool_path="$(xcrun --find "$tool_name" 2>/dev/null)" && [ -n "$tool_path" ]; then
+      printf '%s\n' "$tool_path"
+      return 0
+    fi
+    if command -v "$tool_name" >/dev/null 2>&1; then
+      command -v "$tool_name"
+      return 0
+    fi
+    return 1
+  }
+
+  if metal_path="$(find_developer_tool metal)"; then
+    printf 'metal: %s\n' "$metal_path"
+  else
+    printf 'metal: missing; SiftMetal extraction builds need the Metal shader compiler\n' >&2
+  fi
+  if metallib_path="$(find_developer_tool metallib)"; then
+    printf 'metallib: %s\n' "$metallib_path"
+  else
+    printf 'metallib: missing; SiftMetal CMake will try Metal driver linking\n' >&2
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    if brew --prefix libomp >/dev/null 2>&1; then
+      printf 'libomp: %s\n' "$(brew --prefix libomp)"
+    else
+      printf 'libomp: missing; run `mise run deps:macos`\n' >&2
+    fi
+    if brew list --versions googletest >/dev/null 2>&1; then
+      printf 'googletest: %s\n' "$(brew list --versions googletest)"
+    else
+      printf 'googletest: missing; run `mise run deps:macos` before `mise run test:metal`\n' >&2
+    fi
+  else
+    printf 'Homebrew: missing; install Homebrew before `mise run deps:macos`\n' >&2
+  fi
+fi
+'''
+
+[tasks."deps:macos"]
+description = "Install the documented macOS native dependencies through Homebrew."
+run = '''
+set -eu
+if [ "$(uname -s)" != "Darwin" ]; then
+  printf 'deps:macos only applies to macOS.\n' >&2
+  exit 2
+fi
+if ! command -v brew >/dev/null 2>&1; then
+  printf 'Homebrew is required for native macOS COLMAP dependencies.\n' >&2
+  exit 2
+fi
+
+brew install \
+  cmake \
+  ninja \
+  boost \
+  eigen \
+  openimageio \
+  curl \
+  libomp \
+  metis \
+  glog \
+  googletest \
+  ceres-solver \
+  suitesparse \
+  qt \
+  glew \
+  cgal \
+  sqlite3 \
+  ccache
+brew link --force libomp
+'''
+
+[tasks."configure:cpu"]
+description = "Configure a minimal non-Metal CPU build for comparison."
+run = '''
+set -eu
+set -- \
+  "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release}" \
+  "-DCUDA_ENABLED=OFF" \
+  "-DMETAL_ENABLED=OFF" \
+  "-DONNX_ENABLED=OFF" \
+  "-DGUI_ENABLED=OFF" \
+  "-DOPENGL_ENABLED=OFF" \
+  "-DMVS_ENABLED=OFF" \
+  "-DCGAL_ENABLED=OFF" \
+  "-DDOWNLOAD_ENABLED=OFF" \
+  "-DTESTS_ENABLED=OFF" \
+  "-DFETCH_POSELIB=OFF" \
+  "-DFETCH_FAISS=OFF"
+
+if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+  libomp_prefix="$(brew --prefix libomp 2>/dev/null || true)"
+  if [ -n "$libomp_prefix" ]; then
+    set -- "$@" \
+      "-DOpenMP_ROOT=${libomp_prefix}" \
+      "-DOpenMP_C_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_C_LIB_NAMES=omp" \
+      "-DOpenMP_CXX_LIB_NAMES=omp" \
+      "-DOpenMP_omp_LIBRARY=${libomp_prefix}/lib/libomp.dylib"
+  fi
+fi
+
+if [ -d /opt/anaconda3 ]; then
+  set -- "$@" "-DCMAKE_IGNORE_PREFIX_PATH=/opt/anaconda3"
+fi
+
+cmake -S . -B "$COLMAP_CPU_BUILD_DIR" -GNinja "$@" ${COLMAP_CMAKE_EXTRA_ARGS:-}
+'''
+
+[tasks."configure:metal"]
+description = "Configure a minimal Apple Metal matcher build."
+run = '''
+set -eu
+set -- \
+  "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release}" \
+  "-DCUDA_ENABLED=OFF" \
+  "-DMETAL_ENABLED=ON" \
+  "-DSIFT_METAL_ENABLED=OFF" \
+  "-DONNX_ENABLED=OFF" \
+  "-DGUI_ENABLED=OFF" \
+  "-DOPENGL_ENABLED=OFF" \
+  "-DMVS_ENABLED=OFF" \
+  "-DCGAL_ENABLED=OFF" \
+  "-DDOWNLOAD_ENABLED=OFF" \
+  "-DTESTS_ENABLED=OFF" \
+  "-DFETCH_POSELIB=OFF" \
+  "-DFETCH_FAISS=OFF"
+
+if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+  libomp_prefix="$(brew --prefix libomp 2>/dev/null || true)"
+  if [ -n "$libomp_prefix" ]; then
+    set -- "$@" \
+      "-DOpenMP_ROOT=${libomp_prefix}" \
+      "-DOpenMP_C_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_C_LIB_NAMES=omp" \
+      "-DOpenMP_CXX_LIB_NAMES=omp" \
+      "-DOpenMP_omp_LIBRARY=${libomp_prefix}/lib/libomp.dylib"
+  fi
+fi
+
+if [ -d /opt/anaconda3 ]; then
+  set -- "$@" "-DCMAKE_IGNORE_PREFIX_PATH=/opt/anaconda3"
+fi
+
+cmake -S . -B "${COLMAP_METAL_CONFIGURE_BUILD_DIR:-$COLMAP_METAL_BUILD_DIR}" -GNinja "$@" ${COLMAP_CMAKE_EXTRA_ARGS:-}
+'''
+
+[tasks."configure:sift-metal"]
+description = "Configure an experimental SiftMetal extractor build."
+run = '''
+set -eu
+COLMAP_METAL_CONFIGURE_BUILD_DIR="$COLMAP_SIFT_METAL_BUILD_DIR" \
+COLMAP_CMAKE_EXTRA_ARGS="-DSIFT_METAL_ENABLED=ON ${COLMAP_CMAKE_EXTRA_ARGS:-}" \
+  mise run configure:metal
+'''
+
+[tasks."configure:metal-tests"]
+description = "Configure a Metal build with focused feature tests enabled."
+run = '''
+set -eu
+set -- \
+  "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-Release}" \
+  "-DCUDA_ENABLED=OFF" \
+  "-DMETAL_ENABLED=ON" \
+  "-DSIFT_METAL_ENABLED=OFF" \
+  "-DONNX_ENABLED=OFF" \
+  "-DGUI_ENABLED=OFF" \
+  "-DOPENGL_ENABLED=OFF" \
+  "-DMVS_ENABLED=OFF" \
+  "-DCGAL_ENABLED=OFF" \
+  "-DDOWNLOAD_ENABLED=OFF" \
+  "-DTESTS_ENABLED=ON" \
+  "-DFETCH_POSELIB=OFF" \
+  "-DFETCH_FAISS=OFF"
+
+if [ "$(uname -s)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+  libomp_prefix="$(brew --prefix libomp 2>/dev/null || true)"
+  if [ -n "$libomp_prefix" ]; then
+    set -- "$@" \
+      "-DOpenMP_ROOT=${libomp_prefix}" \
+      "-DOpenMP_C_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I${libomp_prefix}/include" \
+      "-DOpenMP_C_LIB_NAMES=omp" \
+      "-DOpenMP_CXX_LIB_NAMES=omp" \
+      "-DOpenMP_omp_LIBRARY=${libomp_prefix}/lib/libomp.dylib"
+  fi
+fi
+
+if [ -d /opt/anaconda3 ]; then
+  set -- "$@" "-DCMAKE_IGNORE_PREFIX_PATH=/opt/anaconda3"
+fi
+
+cmake -S . -B "$COLMAP_METAL_TEST_BUILD_DIR" -GNinja "$@" ${COLMAP_CMAKE_EXTRA_ARGS:-}
+'''
+
+[tasks."build:cpu"]
+description = "Build the minimal CPU comparison binary."
+depends = ["configure:cpu"]
+run = 'cmake --build "$COLMAP_CPU_BUILD_DIR" --target "$COLMAP_BUILD_TARGET"'
+
+[tasks."build:metal"]
+description = "Build the minimal Metal matcher-enabled binary."
+depends = ["configure:metal"]
+run = 'cmake --build "$COLMAP_METAL_BUILD_DIR" --target "$COLMAP_BUILD_TARGET"'
+
+[tasks."build:sift-metal"]
+description = "Build the experimental SiftMetal extractor-enabled binary."
+depends = ["configure:sift-metal"]
+run = 'cmake --build "$COLMAP_SIFT_METAL_BUILD_DIR" --target "$COLMAP_BUILD_TARGET"'
+
+[tasks."install:metal"]
+description = "Install the SiftMetal-enabled build and verify the metallib is installed."
+depends = ["build:sift-metal"]
+run = '''
+set -eu
+cmake --build "$COLMAP_SIFT_METAL_BUILD_DIR"
+cmake --install "$COLMAP_SIFT_METAL_BUILD_DIR" --prefix "$COLMAP_METAL_INSTALL_DIR"
+test -f "$COLMAP_METAL_INSTALL_DIR/share/colmap/metal/sift.metallib"
+printf 'Installed Metal build: %s\n' "$COLMAP_METAL_INSTALL_DIR"
+'''
+
+[tasks."test:metal"]
+description = "Run focused Metal matcher and SIFT option tests."
+depends = ["configure:metal-tests"]
+run = '''
+set -eu
+cmake --build "$COLMAP_METAL_TEST_BUILD_DIR" --target \
+  colmap_feature_extractor_test \
+  colmap_feature_matcher_test \
+  colmap_feature_metal_matcher_test \
+  colmap_feature_sift_test
+ctest --test-dir "$COLMAP_METAL_TEST_BUILD_DIR" \
+  -R 'feature/(extractor_test|matcher_test|metal_matcher_test|sift_test)' \
+  --output-on-failure
+'''
+
+[tasks."data:gerrard"]
+description = "Download the Gerrard Hall dataset used for longer Metal comparisons."
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+mkdir -p "$COLMAP_DATA_DIR"
+zip_path="$COLMAP_DATA_DIR/gerrard-hall.zip"
+image_dir="$COLMAP_DATA_DIR/gerrard-hall/images"
+
+if [ ! -d "$image_dir" ]; then
+  if [ ! -f "$zip_path" ]; then
+    curl -L \
+      https://github.com/colmap/colmap/releases/download/3.11.1/gerrard-hall.zip \
+      -o "$zip_path"
+  fi
+  python -m zipfile -e "$zip_path" "$COLMAP_DATA_DIR"
+fi
+
+printf '%s\n' "$image_dir"
+'''
+
+[tasks."smoke:metal-extractor"]
+description = "Smoke-test installed Metal SIFT extraction and installed metallib lookup."
+depends = ["install:metal", "data:gerrard"]
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+colmap_bin="$COLMAP_METAL_INSTALL_DIR/bin/colmap"
+image_dir="${COLMAP_SMOKE_IMAGE_DIR:-$COLMAP_DATA_DIR/gerrard-hall/images}"
+run_dir="$COLMAP_DATA_DIR/runs/smoke-metal-extractor-$(date +%Y%m%d-%H%M%S)"
+list_path="$run_dir/images.txt"
+
+mkdir -p "$run_dir"
+find "$image_dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) \
+  -exec basename {} \; | sort | head -n "${COLMAP_SMOKE_IMAGE_COUNT:-3}" > "$list_path"
+test -s "$list_path"
+
+"$colmap_bin" feature_extractor \
+  --database_path "$run_dir/metal-extract.db" \
+  --image_path "$image_dir" \
+  --image_list_path "$list_path" \
+  --ImageReader.single_camera 1 \
+  --FeatureExtraction.use_gpu 1 \
+  --SiftExtraction.use_metal 1 \
+  --FeatureExtraction.max_image_size "${COLMAP_SMOKE_MAX_IMAGE_SIZE:-800}" \
+  --SiftExtraction.max_num_features "${COLMAP_SMOKE_MAX_NUM_FEATURES:-512}"
+
+python - "$run_dir/metal-extract.db" <<'PY'
+import sqlite3
+import sys
+
+con = sqlite3.connect(sys.argv[1])
+cur = con.cursor()
+images = cur.execute("select count(*) from images").fetchone()[0]
+keypoints = cur.execute("select coalesce(sum(rows), 0) from keypoints").fetchone()[0]
+descriptors = cur.execute("select coalesce(sum(rows), 0) from descriptors").fetchone()[0]
+con.close()
+print(f"images={images} keypoints={keypoints} descriptors={descriptors}")
+if images == 0 or keypoints == 0 or descriptors == 0:
+    raise SystemExit(1)
+PY
+
+printf 'Smoke output: %s\n' "$run_dir"
+'''
+
+[tasks."prior-art:byplay"]
+description = "Fetch the byplay-io COLMAP Metal fork for audit without modifying this checkout."
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+prior_art_dir="$COLMAP_DATA_DIR/prior-art"
+repo_dir="$prior_art_dir/colmap-metal"
+mkdir -p "$prior_art_dir"
+
+if [ ! -d "$repo_dir/.git" ]; then
+  git clone --depth 1 https://github.com/byplay-io/colmap-metal "$repo_dir"
+else
+  git -C "$repo_dir" fetch --depth 1 origin
+fi
+
+git -C "$repo_dir" log -1 --oneline
+'''
+
+[tasks."compare:gerrard"]
+description = "Run a CPU-vs-Metal sequential matching and mapper comparison on Gerrard Hall."
+depends = ["build:metal", "data:gerrard"]
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+colmap_bin="$COLMAP_METAL_BUILD_DIR/src/colmap/exe/colmap"
+image_dir="$COLMAP_DATA_DIR/gerrard-hall/images"
+run_dir="$COLMAP_DATA_DIR/runs/gerrard-$(date +%Y%m%d-%H%M%S)"
+features_db="$run_dir/features.db"
+cpu_db="$run_dir/cpu.db"
+metal_db="$run_dir/metal.db"
+threads="${COLMAP_COMPARE_THREADS:-6}"
+max_image_size="${COLMAP_COMPARE_MAX_IMAGE_SIZE:-1000}"
+max_num_features="${COLMAP_COMPARE_MAX_NUM_FEATURES:-1024}"
+
+mkdir -p "$run_dir/cpu_sparse" "$run_dir/metal_sparse"
+
+/usr/bin/time -p "$colmap_bin" feature_extractor \
+  --database_path "$features_db" \
+  --image_path "$image_dir" \
+  --ImageReader.single_camera 1 \
+  --FeatureExtraction.use_gpu 0 \
+  --FeatureExtraction.max_image_size "$max_image_size" \
+  --FeatureExtraction.num_threads "$threads" \
+  --SiftExtraction.max_num_features "$max_num_features"
+
+cp "$features_db" "$cpu_db"
+cp "$features_db" "$metal_db"
+
+/usr/bin/time -p "$colmap_bin" sequential_matcher \
+  --database_path "$cpu_db" \
+  --FeatureMatching.use_gpu 0 \
+  --SiftMatching.cpu_brute_force_matcher 1 \
+  --SequentialMatching.overlap 10 \
+  --SequentialMatching.loop_detection 0 \
+  --FeatureMatching.num_threads 1
+
+/usr/bin/time -p "$colmap_bin" sequential_matcher \
+  --database_path "$metal_db" \
+  --FeatureMatching.use_gpu 1 \
+  --SiftMatching.use_metal 1 \
+  --SequentialMatching.overlap 10 \
+  --SequentialMatching.loop_detection 0 \
+  --FeatureMatching.num_threads 1
+
+/usr/bin/time -p "$colmap_bin" mapper \
+  --database_path "$cpu_db" \
+  --image_path "$image_dir" \
+  --output_path "$run_dir/cpu_sparse" \
+  --Mapper.num_threads "$threads"
+
+/usr/bin/time -p "$colmap_bin" mapper \
+  --database_path "$metal_db" \
+  --image_path "$image_dir" \
+  --output_path "$run_dir/metal_sparse" \
+  --Mapper.num_threads "$threads"
+
+python - "$cpu_db" "$metal_db" <<'PY'
+import sqlite3
+import sys
+
+for label, db_path in (("CPU", sys.argv[1]), ("Metal", sys.argv[2])):
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    raw_matches = cur.execute(
+        "select coalesce(sum(rows), 0), count(*) from matches where rows > 0"
+    ).fetchone()
+    verified = cur.execute(
+        "select coalesce(sum(rows), 0), count(*) from two_view_geometries where rows > 0"
+    ).fetchone()
+    con.close()
+    print(
+        f"{label}: raw_matches={raw_matches[0]} raw_pairs={raw_matches[1]} "
+        f"verified_inliers={verified[0]} verified_pairs={verified[1]}"
+    )
+PY
+
+printf 'Comparison output: %s\n' "$run_dir"
+for model_dir in "$run_dir"/cpu_sparse/* "$run_dir"/metal_sparse/*; do
+  if [ -d "$model_dir" ]; then
+    printf '\n== %s ==\n' "$model_dir"
+    "$colmap_bin" model_analyzer --path "$model_dir" || true
+  fi
+done
+'''
+
+[tasks."compare:extractor"]
+description = "Compare CPU extraction, Metal extraction, and full Metal extraction+matching on an image folder."
+depends = ["build:sift-metal"]
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+: "${COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR:?Set COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR}"
+colmap_bin="$COLMAP_SIFT_METAL_BUILD_DIR/src/colmap/exe/colmap"
+image_dir="$COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR"
+name="${COLMAP_EXTRACTOR_COMPARE_NAME:-extractor}"
+run_dir="$COLMAP_DATA_DIR/runs/${name}-extractor-$(date +%Y%m%d-%H%M%S)"
+threads="${COLMAP_COMPARE_THREADS:-6}"
+extract_threads="${COLMAP_COMPARE_EXTRACT_THREADS:-1}"
+cpu_extract_threads="${COLMAP_COMPARE_CPU_EXTRACT_THREADS:-$extract_threads}"
+metal_extract_threads="${COLMAP_COMPARE_METAL_EXTRACT_THREADS:-$extract_threads}"
+mapper_threads="${COLMAP_COMPARE_MAPPER_THREADS:-$threads}"
+max_image_size="${COLMAP_COMPARE_MAX_IMAGE_SIZE:-1000}"
+max_num_features="${COLMAP_COMPARE_MAX_NUM_FEATURES:-1024}"
+max_num_orientations="${COLMAP_COMPARE_MAX_NUM_ORIENTATIONS:-2}"
+exact_feature_cap="${COLMAP_COMPARE_EXACT_FEATURE_CAP:-1}"
+cpu_db="$run_dir/cpu_full.db"
+metal_extractor_db="$run_dir/metal_extractor_only.db"
+metal_full_db="$run_dir/metal_full.db"
+
+mkdir -p "$run_dir/cpu_sparse" "$run_dir/metal_extractor_sparse" "$run_dir/metal_full_sparse"
+
+cap_feature_rows() {
+  db_path="$1"
+  feature_cap="$2"
+  if [ "$exact_feature_cap" != "1" ]; then
+    return 0
+  fi
+  python - "$db_path" "$feature_cap" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+feature_cap = int(sys.argv[2])
+
+con = sqlite3.connect(db_path)
+cur = con.cursor()
+
+updated_images = set()
+for table in ("keypoints", "descriptors"):
+    rows = cur.execute(
+        f"select image_id, rows, data from {table} where rows > ?",
+        (feature_cap,),
+    ).fetchall()
+    for image_id, num_rows, data in rows:
+        if data is None or num_rows <= 0:
+            continue
+        bytes_per_row = len(data) // num_rows
+        cur.execute(
+            f"update {table} set rows = ?, data = ? where image_id = ?",
+            (feature_cap, data[: feature_cap * bytes_per_row], image_id),
+        )
+        updated_images.add(image_id)
+
+con.commit()
+con.close()
+
+if updated_images:
+    print(
+        f"Exact-capped {len(updated_images)} images in {db_path} "
+        f"to {feature_cap} feature rows"
+    )
+PY
+}
+
+/usr/bin/time -p "$colmap_bin" feature_extractor \
+  --database_path "$cpu_db" \
+  --image_path "$image_dir" \
+  --ImageReader.single_camera 1 \
+  --FeatureExtraction.use_gpu 0 \
+  --FeatureExtraction.max_image_size "$max_image_size" \
+  --FeatureExtraction.num_threads "$cpu_extract_threads" \
+  --SiftExtraction.max_num_features "$max_num_features" \
+  --SiftExtraction.max_num_orientations "$max_num_orientations"
+cap_feature_rows "$cpu_db" "$max_num_features"
+
+/usr/bin/time -p "$colmap_bin" feature_extractor \
+  --database_path "$metal_extractor_db" \
+  --image_path "$image_dir" \
+  --ImageReader.single_camera 1 \
+  --FeatureExtraction.use_gpu 1 \
+  --SiftExtraction.use_metal 1 \
+  --FeatureExtraction.max_image_size "$max_image_size" \
+  --FeatureExtraction.num_threads "$metal_extract_threads" \
+  --SiftExtraction.max_num_features "$max_num_features" \
+  --SiftExtraction.max_num_orientations "$max_num_orientations"
+cap_feature_rows "$metal_extractor_db" "$max_num_features"
+
+cp "$metal_extractor_db" "$metal_full_db"
+
+/usr/bin/time -p "$colmap_bin" sequential_matcher \
+  --database_path "$cpu_db" \
+  --FeatureMatching.use_gpu 0 \
+  --SiftMatching.cpu_brute_force_matcher 1 \
+  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
+  --SequentialMatching.loop_detection 0 \
+  --FeatureMatching.num_threads 1
+
+/usr/bin/time -p "$colmap_bin" sequential_matcher \
+  --database_path "$metal_extractor_db" \
+  --FeatureMatching.use_gpu 0 \
+  --SiftMatching.cpu_brute_force_matcher 1 \
+  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
+  --SequentialMatching.loop_detection 0 \
+  --FeatureMatching.num_threads 1
+
+/usr/bin/time -p "$colmap_bin" sequential_matcher \
+  --database_path "$metal_full_db" \
+  --FeatureMatching.use_gpu 1 \
+  --SiftMatching.use_metal 1 \
+  --SequentialMatching.overlap "${COLMAP_COMPARE_OVERLAP:-10}" \
+  --SequentialMatching.loop_detection 0 \
+  --FeatureMatching.num_threads 1
+
+/usr/bin/time -p "$colmap_bin" mapper \
+  --database_path "$cpu_db" \
+  --image_path "$image_dir" \
+  --output_path "$run_dir/cpu_sparse" \
+  --Mapper.num_threads "$mapper_threads"
+
+/usr/bin/time -p "$colmap_bin" mapper \
+  --database_path "$metal_extractor_db" \
+  --image_path "$image_dir" \
+  --output_path "$run_dir/metal_extractor_sparse" \
+  --Mapper.num_threads "$mapper_threads"
+
+/usr/bin/time -p "$colmap_bin" mapper \
+  --database_path "$metal_full_db" \
+  --image_path "$image_dir" \
+  --output_path "$run_dir/metal_full_sparse" \
+  --Mapper.num_threads "$mapper_threads"
+
+python - "$cpu_db" "$metal_extractor_db" "$metal_full_db" <<'PY'
+import sqlite3
+import sys
+
+labels = ("cpu_full", "metal_extractor_only", "metal_full")
+for label, db_path in zip(labels, sys.argv[1:]):
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    images = cur.execute("select count(*) from images").fetchone()[0]
+    keypoints = cur.execute("select coalesce(sum(rows), 0) from keypoints").fetchone()[0]
+    descriptors = cur.execute("select coalesce(sum(rows), 0) from descriptors").fetchone()[0]
+    raw = cur.execute("select coalesce(sum(rows), 0), count(*) from matches where rows > 0").fetchone()
+    verified = cur.execute("select coalesce(sum(rows), 0), count(*) from two_view_geometries where rows > 0").fetchone()
+    con.close()
+    print(
+        f"{label}: images={images} keypoints={keypoints} descriptors={descriptors} "
+        f"raw_matches={raw[0]} raw_pairs={raw[1]} "
+        f"verified_inliers={verified[0]} verified_pairs={verified[1]}"
+    )
+PY
+
+printf 'Extractor comparison output: %s\n' "$run_dir"
+for model_dir in "$run_dir"/cpu_sparse/* "$run_dir"/metal_extractor_sparse/* "$run_dir"/metal_full_sparse/*; do
+  if [ -d "$model_dir" ]; then
+    printf '\n== %s ==\n' "$model_dir"
+    "$colmap_bin" model_analyzer --path "$model_dir" || true
+  fi
+done
+'''
+
+[tasks."compare:gerrard-extractor"]
+description = "Run the extractor-isolated Metal comparison on Gerrard Hall."
+depends = ["data:gerrard"]
+run = '''
+set -eu
+COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
+COLMAP_EXTRACTOR_COMPARE_NAME=gerrard \
+COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR="$COLMAP_DATA_DIR/gerrard-hall/images" \
+mise run compare:extractor
+'''
+
+[tasks."compare:frames:extractor"]
+description = "Run the extractor-isolated Metal comparison on COLMAP_FRAMES_DIR."
+run = '''
+set -eu
+: "${COLMAP_FRAMES_DIR:?Set COLMAP_FRAMES_DIR to a folder of frames}"
+COLMAP_EXTRACTOR_COMPARE_NAME=frames \
+COLMAP_EXTRACTOR_COMPARE_IMAGE_DIR="$COLMAP_FRAMES_DIR" \
+mise run compare:extractor
+'''
+
+[tasks."format:cxx"]
+description = "Run COLMAP's C++ formatter."
+run = "scripts/format/c++.sh"
+
+[tasks."format:python"]
+description = "Run COLMAP's Python formatter."
+run = "scripts/format/python.sh"

@@ -317,6 +317,49 @@ TEST(SiftCPUFeatureMatcher, Nominal) {
   EXPECT_EQ(matches.size(), 0);
 }
 
+TEST(SiftMetalFeatureMatcher, Nominal) {
+#if defined(COLMAP_METAL_ENABLED)
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kSimplePinhole, 100.0, 100, 200);
+  const FeatureMatcher::Image image0 = {
+      /*image_id=*/0,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(0),
+      std::make_shared<FeatureDescriptors>(CreateEmptyDescriptors())};
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{{1, 0}, {2, 0}}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{{2, 0}, {1, 0}}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+
+  FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+  options.use_gpu = true;
+  options.sift->use_metal = true;
+  auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+  FeatureMatches matches;
+  matcher->Match(image1, image2, &matches);
+  ExpectReversedMatches(matches);
+
+  matcher->Match(image0, image2, &matches);
+  EXPECT_EQ(matches.size(), 0);
+
+  TwoViewGeometry two_view_geometry = CreatePlanarTwoViewGeometry();
+  matcher->MatchGuided(1.0, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+#else
+  GTEST_SKIP() << "Metal SIFT matcher is not compiled";
+#endif
+}
+
 TEST(SiftCPUFeatureMatcher, TypeMismatch) {
   const Camera camera = Camera::CreateFromModelId(
       1, CameraModelId::kSimplePinhole, 100.0, 100, 200);

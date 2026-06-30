@@ -138,6 +138,10 @@ void BindFeatureMatching(py::module& m) {
               "cpu_brute_force_matcher",
               &SiftMatchingOptions::cpu_brute_force_matcher,
               "Whether to use brute-force instead of faiss based CPU matching.")
+          .def_readwrite(
+              "use_metal",
+              &SiftMatchingOptions::use_metal,
+              "Whether to use the Apple Metal SIFT descriptor matcher.")
 #ifdef COLMAP_ONNX_ENABLED
           .def_readwrite("lightglue",
                          &SiftMatchingOptions::lightglue,

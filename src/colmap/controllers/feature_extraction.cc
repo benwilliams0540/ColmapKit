@@ -407,6 +407,10 @@ class FeatureExtractorController : public Thread {
          extraction_options_.sift->estimate_affine_shape)) {
       worker_extraction_options.use_gpu = false;
     }
+    const bool use_metal_sift =
+        worker_extraction_options.type == FeatureExtractorType::SIFT &&
+        worker_extraction_options.sift != nullptr &&
+        worker_extraction_options.sift->use_metal;
 
     if (worker_extraction_options.use_gpu) {
       std::vector<int> gpu_indices =
@@ -422,9 +426,19 @@ class FeatureExtractorController : public Thread {
       }
 #endif  // COLMAP_CUDA_ENABLED
 
+      if (use_metal_sift && gpu_indices.size() > 1) {
+        LOG(WARNING)
+            << "Metal SIFT extraction currently uses one Metal device; "
+               "ignoring additional gpu_index entries.";
+        gpu_indices.resize(1);
+      }
+
       // Prevent nested threading, as we multi-thread at the controller level.
       worker_extraction_options.num_threads =
-          std::max(num_threads / static_cast<int>(gpu_indices.size()), 1);
+          use_metal_sift
+              ? 1
+              : std::max(num_threads / static_cast<int>(gpu_indices.size()),
+                         1);
 
       for (const int gpu_index : gpu_indices) {
         worker_extraction_options.gpu_index = std::to_string(gpu_index);

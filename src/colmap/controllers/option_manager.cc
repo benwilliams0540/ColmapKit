@@ -267,6 +267,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                    &feature_extraction->sift->max_num_orientations);
   AddDefaultOption("SiftExtraction.upright",
                    &feature_extraction->sift->upright);
+  AddDefaultOption("SiftExtraction.use_metal",
+                   &feature_extraction->sift->use_metal);
   AddDefaultOption("SiftExtraction.domain_size_pooling",
                    &feature_extraction->sift->domain_size_pooling);
   AddDefaultOption("SiftExtraction.dsp_min_scale",
@@ -319,6 +321,8 @@ void OptionManager::AddFeatureMatchingOptions() {
                    &feature_matching->sift->cross_check);
   AddDefaultOption("SiftMatching.cpu_brute_force_matcher",
                    &feature_matching->sift->cpu_brute_force_matcher);
+  AddDefaultOption("SiftMatching.use_metal",
+                   &feature_matching->sift->use_metal);
   AddDefaultOption("SiftMatching.lightglue_min_score",
                    &feature_matching->sift->lightglue.min_score);
   AddDefaultOption("SiftMatching.lightglue_model_path",

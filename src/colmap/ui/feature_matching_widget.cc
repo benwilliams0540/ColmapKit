@@ -154,6 +154,8 @@ void FeatureMatchingTab::CreateGeneralOptions() {
       &options_->feature_matching->sift->max_distance, "sift.max_distance");
   options_widget_->AddOptionBool(&options_->feature_matching->sift->cross_check,
                                  "sift.cross_check");
+  options_widget_->AddOptionBool(&options_->feature_matching->sift->use_metal,
+                                 "sift.use_metal");
 
   options_widget_->AddSpacer();
   options_widget_->AddSection("Geometric verification");
