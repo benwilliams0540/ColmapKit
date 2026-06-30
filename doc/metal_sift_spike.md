@@ -281,12 +281,25 @@ Resolved in this branch:
 
 ## Suggested Next Steps
 
-1. Add a non-default `MetalSiftFeatureExtractor` class guarded by
-   `__APPLE__` and a CMake Metal option, but continue returning
-   `FeatureExtractorType::SIFT` descriptors.
-2. Validate descriptor ordering and normalization against VLFeat on synthetic
+The current integration remains opt-in with `-DSIFT_METAL_ENABLED=ON` and
+runtime `--FeatureExtraction.use_gpu 1 --SiftExtraction.use_metal 1`. The
+Metal path maps the baseline non-covariant SIFT options for octave layout,
+thresholds, feature caps, orientation count, and upright mode, then lets COLMAP
+apply the requested descriptor normalization. Affine shape, domain-size pooling,
+and forced covariant extraction fall back to CPU covariant SIFT; Metal logs that
+darkness adaptivity is ignored because it is only implemented by GLSL SiftGPU.
+The controller uses one extractor worker on the default Metal device and ignores
+`FeatureExtraction.gpu_index` for this backend.
+
+Focused validation without requiring a Metal extraction device:
+
+```bash
+mise run test:metal
+```
+
+1. Validate descriptor ordering and normalization against VLFeat on synthetic
    images, then decide whether final normalization should move onto the GPU.
-3. Add parity tests for keypoint coordinate/scale/orientation ranges and
+2. Add parity tests for keypoint coordinate/scale/orientation ranges and
    descriptor shape/type before measuring reconstruction quality.
-4. Benchmark extraction-only runtime and end-to-end matching/reconstruction on
+3. Benchmark extraction-only runtime and end-to-end matching/reconstruction on
    a small image set before replacing any existing SIFT backend.

@@ -41,6 +41,8 @@
 #include "colmap/math/random.h"
 #include "colmap/util/opengl_utils.h"
 
+#include <array>
+#include <cmath>
 #include <functional>
 
 namespace colmap {
@@ -109,6 +111,78 @@ TwoViewGeometry CreatePlanarTwoViewGeometry() {
   tvg.config = TwoViewGeometry::PLANAR_OR_PANORAMIC;
   tvg.H = Eigen::Matrix3d::Identity();
   return tvg;
+}
+
+TEST(SiftDescriptorUtils, KeepsZeroRowsFiniteDuringNormalization) {
+  FeatureDescriptorsFloatData l2_descriptors =
+      FeatureDescriptorsFloatData::Zero(2, kSiftUBCDescriptorDim);
+  l2_descriptors(1, 0) = 3.0f;
+  l2_descriptors(1, 1) = 4.0f;
+
+  L2NormalizeFeatureDescriptors(&l2_descriptors);
+  EXPECT_EQ(l2_descriptors.row(0).squaredNorm(), 0.0f);
+  EXPECT_TRUE(l2_descriptors.row(0).array().isFinite().all());
+  EXPECT_NEAR(l2_descriptors.row(1).norm(), 1.0f, 1e-6f);
+
+  FeatureDescriptorsFloatData root_descriptors =
+      FeatureDescriptorsFloatData::Zero(2, kSiftUBCDescriptorDim);
+  root_descriptors(1, 0) = 1.0f;
+  root_descriptors(1, 1) = 3.0f;
+
+  L1RootNormalizeFeatureDescriptors(&root_descriptors);
+  EXPECT_EQ(root_descriptors.row(0).squaredNorm(), 0.0f);
+  EXPECT_TRUE(root_descriptors.row(0).array().isFinite().all());
+  EXPECT_NEAR(root_descriptors.row(1).norm(), 1.0f, 1e-6f);
+  EXPECT_NEAR(root_descriptors(1, 0), 0.5f, 1e-6f);
+  EXPECT_NEAR(root_descriptors(1, 1), std::sqrt(0.75f), 1e-6f);
+}
+
+TEST(SiftDescriptorUtils, QuantizesWithSiftGPUScaleAndSaturation) {
+  FeatureDescriptorsFloatData descriptors(1, 5);
+  descriptors << -0.1f, 0.0f, 0.2f, 0.5f, 1.0f;
+
+  const FeatureDescriptorsData descriptors_uint8 =
+      FeatureDescriptorsToUnsignedByte(descriptors);
+
+  EXPECT_EQ(descriptors_uint8(0, 0), 0);
+  EXPECT_EQ(descriptors_uint8(0, 1), 0);
+  EXPECT_EQ(descriptors_uint8(0, 2), 102);
+  EXPECT_EQ(descriptors_uint8(0, 3), 255);
+  EXPECT_EQ(descriptors_uint8(0, 4), 255);
+}
+
+TEST(SiftDescriptorUtils, UBCDescriptorIndexMatchesSiftGPUPacking) {
+  EXPECT_EQ(kSiftUBCDescriptorDim, 128);
+  EXPECT_TRUE(IsValidSiftUBCDescriptorDim(128));
+  EXPECT_FALSE(IsValidSiftUBCDescriptorDim(127));
+
+  EXPECT_EQ(SiftUBCDescriptorIndex(0, 0, 0), 0);
+  EXPECT_EQ(SiftUBCDescriptorIndex(1, 0, 0), 8);
+  EXPECT_EQ(SiftUBCDescriptorIndex(0, 1, 0), 32);
+  EXPECT_EQ(SiftUBCDescriptorIndex(3, 3, 7), 127);
+}
+
+TEST(SiftDescriptorUtils, TransformsVLFeatOrientationBinsToUBCOrder) {
+  FeatureDescriptorsData vlfeat(1, kSiftUBCDescriptorDim);
+  for (Eigen::Index c = 0; c < vlfeat.cols(); ++c) {
+    vlfeat(0, c) = static_cast<uint8_t>(c);
+  }
+
+  const FeatureDescriptorsData ubc =
+      TransformVLFeatToUBCFeatureDescriptors(vlfeat);
+  constexpr std::array<int, kSiftUBCDescriptorNumOrientationBins>
+      kVLFeatToUBCOrientationBin{{0, 7, 6, 5, 4, 3, 2, 1}};
+
+  for (int y = 0; y < kSiftUBCDescriptorNumSpatialBins; ++y) {
+    for (int x = 0; x < kSiftUBCDescriptorNumSpatialBins; ++x) {
+      for (int bin = 0; bin < kSiftUBCDescriptorNumOrientationBins; ++bin) {
+        EXPECT_EQ(
+            ubc(0,
+                SiftUBCDescriptorIndex(x, y, kVLFeatToUBCOrientationBin[bin])),
+            vlfeat(0, SiftUBCDescriptorIndex(x, y, bin)));
+      }
+    }
+  }
 }
 
 void RunGpuTest(std::function<void()> test_body) {
@@ -183,6 +257,53 @@ INSTANTIATE_TEST_SUITE_P(
         SiftCpuExtractionParams{
             "CovariantAffineDSPSift", true, true, false, false, 22}),
     [](const auto& info) { return info.param.name; });
+
+TEST(SiftExtractionOptions, MetalOptionsMapping) {
+  SiftExtractionOptions options;
+  options.max_num_features = 1234;
+  options.first_octave = 0;
+  options.num_octaves = 6;
+  options.octave_resolution = 5;
+  options.peak_threshold = 0.0125;
+  options.edge_threshold = 12.5;
+  options.max_num_orientations = 3;
+  options.upright = true;
+  options.darkness_adaptivity = true;
+  options.normalization = SiftExtractionOptions::Normalization::L2;
+
+  const MetalSiftExtractionOptions metal_options =
+      CreateMetalSiftExtractionOptions(options);
+
+  EXPECT_EQ(metal_options.max_num_features, options.max_num_features);
+  EXPECT_EQ(metal_options.first_octave, options.first_octave);
+  EXPECT_EQ(metal_options.num_octaves, options.num_octaves);
+  EXPECT_EQ(metal_options.scales_per_octave, options.octave_resolution);
+  EXPECT_FLOAT_EQ(metal_options.peak_threshold,
+                  static_cast<float>(options.peak_threshold));
+  EXPECT_FLOAT_EQ(metal_options.edge_threshold,
+                  static_cast<float>(options.edge_threshold));
+  EXPECT_EQ(metal_options.max_num_orientations, options.max_num_orientations);
+  EXPECT_EQ(metal_options.upright, options.upright);
+}
+
+TEST(SiftExtractionOptions, MetalFallbackReason) {
+  SiftExtractionOptions options;
+  EXPECT_FALSE(RequiresCovariantSiftExtractor(options));
+  EXPECT_TRUE(DescribeMetalSiftFallback(options).empty());
+
+  options.estimate_affine_shape = true;
+  EXPECT_TRUE(RequiresCovariantSiftExtractor(options));
+  EXPECT_NE(DescribeMetalSiftFallback(options).find("affine shape"),
+            std::string::npos);
+
+  options.domain_size_pooling = true;
+  options.force_covariant_extractor = true;
+  const std::string fallback_reason = DescribeMetalSiftFallback(options);
+  EXPECT_NE(fallback_reason.find("affine shape"), std::string::npos);
+  EXPECT_NE(fallback_reason.find("domain-size pooling"), std::string::npos);
+  EXPECT_NE(fallback_reason.find("forced covariant"), std::string::npos);
+  EXPECT_NE(fallback_reason.find("CPU covariant"), std::string::npos);
+}
 
 TEST(ExtractSiftFeaturesGPU, Nominal) {
   RunGpuTest([] {

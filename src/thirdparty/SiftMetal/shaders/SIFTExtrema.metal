@@ -12,6 +12,8 @@
 using namespace metal;
 
 
+constant uint kMaxThreadgroupExtrema = 1024;
+
 constant int3 neighborOffsets[] = {
     int3(-1, -1, -1),
     int3( 0, -1, -1),
@@ -69,20 +71,19 @@ kernel void siftExtremaList(
     ushort tid [[thread_index_in_threadgroup]]
 ) {
     // Thread group runs [0...output.width - 2][0...output.height - 2]
-    const ushort threadsInThreadgroup = 1024;
-    threadgroup SIFTExtremaResult localResults[threadsInThreadgroup];
+    threadgroup SIFTExtremaResult localResults[kMaxThreadgroupExtrema];
     threadgroup atomic_uint localCount;
     atomic_store_explicit(&localCount, 0u, memory_order_relaxed);
-    threadgroup_barrier(mem_flags::mem_none);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     
     const int2 g = (int2)gid.xy + 1;
     const int s = (int)gid.z + 1;
     const float value = inputTexture.read((ushort2)g, (ushort)s).r;
     
-    float minimum = +1000;
-    float maximum = -1000;
+    float minimum = +INFINITY;
+    float maximum = -INFINITY;
 
-    for (int i = 1; i < 26; i++) {
+    for (int i = 0; i < 26; i++) {
         float neighborValue = fetch(inputTexture, g, s, i);
         minimum = min(minimum, neighborValue);
         maximum = max(maximum, neighborValue);
@@ -90,17 +91,22 @@ kernel void siftExtremaList(
 
     if ((value < minimum) || (value > maximum)) {
         const uint i = atomic_fetch_add_explicit(&localCount, 1u, memory_order_relaxed);
-        SIFTExtremaResult result;
-        result.x = g.x;
-        result.y = g.y;
-        result.scale = s;
-        localResults[i] = result;
+        if (i < kMaxThreadgroupExtrema) {
+            SIFTExtremaResult result;
+            result.x = g.x;
+            result.y = g.y;
+            result.scale = s;
+            localResults[i] = result;
+        }
     }
     
     // Copy local results to output
-    threadgroup_barrier(mem_flags::mem_none);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
-        const uint count = atomic_load_explicit(&localCount, memory_order_relaxed);
+        const uint count = min(
+            atomic_load_explicit(&localCount, memory_order_relaxed),
+            kMaxThreadgroupExtrema
+        );
         if (count > 0) {
             const uint b = atomic_fetch_add_explicit(outputCount, count, memory_order_relaxed);
             if (b < parameters.outputCapacity) {
@@ -123,18 +129,18 @@ kernel void siftExtrema(
 ) {
     // Thread group runs [0...output.width - 2][0...output.height - 2]
     
-    const float value = inputTexture.read(gid.xy + 1, gid.z + 1).r;
-    const int2 center = int2(gid.xy);
+    const int2 g = int2(gid.xy) + 1;
+    const int s = (int)gid.z + 1;
+    const float value = inputTexture.read((ushort2)g, (ushort)s).r;
     
-    float minValue = +1000;
-    float maxValue = -1000;
+    float minValue = +INFINITY;
+    float maxValue = -INFINITY;
 
     for (int i = 0; i < 26; i++) {
-        int3 neighborOffset = neighborOffsets[i];
-        ushort textureIndex = gid.z + neighborOffset.x;
-        int2 neighborDelta = int2(neighborOffset.yz);
-        ushort2 coordinate = ushort2(center + neighborDelta);
-        float neighborValue = inputTexture.read(coordinate + 1, textureIndex).r;
+        const int3 neighborOffset = neighborOffsets[i];
+        const int2 coordinate = g + neighborOffset.xy;
+        const int textureIndex = s + neighborOffset.z;
+        float neighborValue = inputTexture.read((ushort2)coordinate, (ushort)textureIndex).r;
 
         minValue = min(minValue, neighborValue);
         maxValue = max(maxValue, neighborValue);

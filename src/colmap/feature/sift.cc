@@ -54,13 +54,13 @@
 #include "thirdparty/VLFeat/covdet.h"
 #include "thirdparty/VLFeat/sift.h"
 
-#include <array>
 #include <fstream>
 #include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 #include <Eigen/Geometry>
 
@@ -92,11 +92,86 @@ bool SiftMatchingOptions::Check() const {
   return true;
 }
 
+bool RequiresCovariantSiftExtractor(const SiftExtractionOptions& options) {
+  return options.estimate_affine_shape || options.domain_size_pooling ||
+         options.force_covariant_extractor;
+}
+
+std::string DescribeMetalSiftFallback(const SiftExtractionOptions& options) {
+  std::vector<std::string> unsupported_options;
+  if (options.estimate_affine_shape) {
+    unsupported_options.push_back("affine shape estimation");
+  }
+  if (options.domain_size_pooling) {
+    unsupported_options.push_back("domain-size pooling");
+  }
+  if (options.force_covariant_extractor) {
+    unsupported_options.push_back("forced covariant extraction");
+  }
+
+  if (unsupported_options.empty()) {
+    return "";
+  }
+
+  std::ostringstream message;
+  message << "Metal SIFT extraction does not support ";
+  for (size_t i = 0; i < unsupported_options.size(); ++i) {
+    if (i > 0) {
+      message << (i + 1 == unsupported_options.size() ? ", or " : ", ");
+    }
+    message << unsupported_options[i];
+  }
+  message << "; falling back to the CPU covariant SIFT extractor.";
+  return message.str();
+}
+
+MetalSiftExtractionOptions CreateMetalSiftExtractionOptions(
+    const SiftExtractionOptions& options) {
+  MetalSiftExtractionOptions metal_options;
+  metal_options.num_octaves = options.num_octaves;
+  metal_options.scales_per_octave = options.octave_resolution;
+  metal_options.first_octave = options.first_octave;
+  metal_options.peak_threshold = static_cast<float>(options.peak_threshold);
+  metal_options.edge_threshold = static_cast<float>(options.edge_threshold);
+  metal_options.max_num_features = options.max_num_features;
+  metal_options.max_num_orientations = options.max_num_orientations;
+  metal_options.upright = options.upright;
+  return metal_options;
+}
+
 namespace {
 
 void WarnDarknessAdaptivityNotAvailable() {
   LOG(WARNING) << "Darkness adaptivity only available for GLSL SiftGPU.";
 }
+
+#if defined(COLMAP_SIFT_METAL_ENABLED)
+void LogSiftMetalStatus(const sift_metal::StatusReport& status) {
+  bool logged_message = false;
+  for (const sift_metal::StatusMessage& message : status.messages) {
+    if (message.severity == sift_metal::StatusSeverity::kInfo) {
+      continue;
+    }
+
+    std::ostringstream log_message;
+    log_message << "SiftMetal " << message.stage << ": " << message.message;
+    if (!message.detail.empty()) {
+      log_message << " (" << message.detail << ")";
+    }
+
+    if (message.severity == sift_metal::StatusSeverity::kError) {
+      LOG(ERROR) << log_message.str();
+    } else {
+      LOG(WARNING) << log_message.str();
+    }
+    logged_message = true;
+  }
+
+  if (!status.ok && !logged_message) {
+    LOG(ERROR) << "SiftMetal " << status.stage << ": " << status.message;
+  }
+}
+#endif  // COLMAP_SIFT_METAL_ENABLED
 
 void ThrowCheckFeatureTypesMatch(const FeatureMatcher::Image& image1,
                                  const FeatureMatcher::Image& image2,
@@ -115,26 +190,6 @@ void ThrowCheckFeatureTypesMatch(const FeatureMatcher::Image& image1,
     THROW_CHECK_EQ(image1.descriptors->data.rows(), image1.keypoints->size());
     THROW_CHECK_EQ(image2.descriptors->data.rows(), image2.keypoints->size());
   }
-}
-
-// VLFeat uses a different convention to store its descriptors. This transforms
-// the VLFeat format into the original SIFT format that is also used by SiftGPU.
-FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
-    const FeatureDescriptorsData& vlfeat_descriptors) {
-  FeatureDescriptorsData ubc_descriptors(vlfeat_descriptors.rows(),
-                                         vlfeat_descriptors.cols());
-  const std::array<int, 8> q{{0, 7, 6, 5, 4, 3, 2, 1}};
-  for (Eigen::Index n = 0; n < vlfeat_descriptors.rows(); ++n) {
-    for (int i = 0; i < 4; ++i) {
-      for (int j = 0; j < 4; ++j) {
-        for (int k = 0; k < 8; ++k) {
-          ubc_descriptors(n, 8 * (j + 4 * i) + q[k]) =
-              vlfeat_descriptors(n, 8 * (j + 4 * i) + k);
-        }
-      }
-    }
-  }
-  return ubc_descriptors;
 }
 
 class SiftCPUFeatureExtractor : public FeatureExtractor {
@@ -759,26 +814,31 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
     THROW_CHECK(!options_.sift->estimate_affine_shape);
     THROW_CHECK(!options_.sift->domain_size_pooling);
     THROW_CHECK(!options_.sift->force_covariant_extractor);
+    if (options_.sift->darkness_adaptivity) {
+      LOG(WARNING) << "Metal SIFT extraction does not support darkness "
+                      "adaptivity; continuing without darkness adaptivity.";
+    }
   }
 
   static std::unique_ptr<FeatureExtractor> Create(
       const FeatureExtractionOptions& options) {
+    const MetalSiftExtractionOptions mapped_options =
+        CreateMetalSiftExtractionOptions(*options.sift);
     sift_metal::Options metal_options;
-    metal_options.num_octaves = options.sift->num_octaves;
-    metal_options.scales_per_octave = options.sift->octave_resolution;
-    metal_options.first_octave = options.sift->first_octave;
-    metal_options.peak_threshold =
-        static_cast<float>(options.sift->peak_threshold);
-    metal_options.edge_threshold =
-        static_cast<float>(options.sift->edge_threshold);
-    metal_options.max_num_features = options.sift->max_num_features;
-    metal_options.max_num_orientations = options.sift->max_num_orientations;
-    metal_options.upright = options.sift->upright;
+    metal_options.num_octaves = mapped_options.num_octaves;
+    metal_options.scales_per_octave = mapped_options.scales_per_octave;
+    metal_options.first_octave = mapped_options.first_octave;
+    metal_options.peak_threshold = mapped_options.peak_threshold;
+    metal_options.edge_threshold = mapped_options.edge_threshold;
+    metal_options.max_num_features = mapped_options.max_num_features;
+    metal_options.max_num_orientations = mapped_options.max_num_orientations;
+    metal_options.upright = mapped_options.upright;
 
     auto extractor = std::make_unique<SiftMetalFeatureExtractor>(options);
     const int max_image_size = options.EffMaxImageSize();
     if (!extractor->extractor_.Init(
             metal_options, max_image_size, max_image_size)) {
+      LogSiftMetalStatus(extractor->extractor_.LastStatus());
       return nullptr;
     }
 
@@ -797,6 +857,7 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
                             bitmap.Width(),
                             bitmap.Height(),
                             &metal_result)) {
+      LogSiftMetalStatus(extractor_.LastStatus());
       return false;
     }
 
@@ -848,13 +909,9 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
 
 std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
     const FeatureExtractionOptions& options) {
-  if (options.sift->estimate_affine_shape ||
-      options.sift->domain_size_pooling ||
-      options.sift->force_covariant_extractor) {
+  if (RequiresCovariantSiftExtractor(*options.sift)) {
     if (options.use_gpu && options.sift->use_metal) {
-      LOG(WARNING) << "Metal SIFT extraction does not support affine shape, "
-                      "domain-size pooling, or the covariant extractor; "
-                      "falling back to the CPU covariant SIFT extractor.";
+      LOG(WARNING) << DescribeMetalSiftFallback(*options.sift);
     }
     LOG(INFO) << "Creating Covariant SIFT CPU feature extractor";
     return CovariantSiftCPUFeatureExtractor::Create(options);

@@ -31,6 +31,8 @@
 
 #include "colmap/math/math.h"
 
+#include <array>
+
 namespace colmap {
 
 std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
@@ -43,13 +45,22 @@ std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
 }
 
 void L2NormalizeFeatureDescriptors(FeatureDescriptorsFloatData* descriptors) {
-  descriptors->rowwise().normalize();
+  for (Eigen::Index r = 0; r < descriptors->rows(); ++r) {
+    const float norm = descriptors->row(r).norm();
+    if (norm > 0) {
+      descriptors->row(r) /= norm;
+    }
+  }
 }
 
 void L1RootNormalizeFeatureDescriptors(
     FeatureDescriptorsFloatData* descriptors) {
   for (Eigen::Index r = 0; r < descriptors->rows(); ++r) {
-    descriptors->row(r) *= 1 / descriptors->row(r).lpNorm<1>();
+    const float norm = descriptors->row(r).lpNorm<1>();
+    if (norm <= 0) {
+      continue;
+    }
+    descriptors->row(r) *= 1 / norm;
     descriptors->row(r) = descriptors->row(r).array().sqrt();
   }
 }
@@ -66,6 +77,50 @@ FeatureDescriptorsData FeatureDescriptorsToUnsignedByte(
     }
   }
   return descriptors_unsigned_byte;
+}
+
+Eigen::Index SiftUBCDescriptorIndex(const int x,
+                                    const int y,
+                                    const int orientation_bin) {
+  THROW_CHECK_GE(x, 0);
+  THROW_CHECK_LT(x, kSiftUBCDescriptorNumSpatialBins);
+  THROW_CHECK_GE(y, 0);
+  THROW_CHECK_LT(y, kSiftUBCDescriptorNumSpatialBins);
+  THROW_CHECK_GE(orientation_bin, 0);
+  THROW_CHECK_LT(orientation_bin, kSiftUBCDescriptorNumOrientationBins);
+
+  return ((y * kSiftUBCDescriptorNumSpatialBins + x) *
+          kSiftUBCDescriptorNumOrientationBins) +
+         orientation_bin;
+}
+
+bool IsValidSiftUBCDescriptorDim(const Eigen::Index descriptor_dim) {
+  return descriptor_dim == kSiftUBCDescriptorDim;
+}
+
+FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
+    const Eigen::Ref<const FeatureDescriptorsData>& vlfeat_descriptors) {
+  THROW_CHECK(IsValidSiftUBCDescriptorDim(vlfeat_descriptors.cols()));
+
+  FeatureDescriptorsData ubc_descriptors(vlfeat_descriptors.rows(),
+                                         vlfeat_descriptors.cols());
+  constexpr std::array<int, kSiftUBCDescriptorNumOrientationBins>
+      kVLFeatToUBCOrientationBin{{0, 7, 6, 5, 4, 3, 2, 1}};
+
+  for (Eigen::Index row = 0; row < vlfeat_descriptors.rows(); ++row) {
+    for (int y = 0; y < kSiftUBCDescriptorNumSpatialBins; ++y) {
+      for (int x = 0; x < kSiftUBCDescriptorNumSpatialBins; ++x) {
+        for (int bin = 0; bin < kSiftUBCDescriptorNumOrientationBins; ++bin) {
+          ubc_descriptors(
+              row,
+              SiftUBCDescriptorIndex(x, y, kVLFeatToUBCOrientationBin[bin])) =
+              vlfeat_descriptors(row, SiftUBCDescriptorIndex(x, y, bin));
+        }
+      }
+    }
+  }
+
+  return ubc_descriptors;
 }
 
 void ExtractTopScaleFeatures(FeatureKeypoints* keypoints,

@@ -116,7 +116,9 @@ endif()
 COLMAP_ADD_TEST(
     NAME extractor_test
     SRCS extractor_test.cc
-    LINK_LIBS colmap_feature
+    LINK_LIBS
+        colmap_feature
+        colmap_controllers
 )
 COLMAP_ADD_TEST(
     NAME index_test

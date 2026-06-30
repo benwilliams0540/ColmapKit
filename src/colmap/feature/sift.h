@@ -36,6 +36,8 @@
 #include "colmap/feature/resources.h"
 #include "colmap/util/cache.h"
 
+#include <string>
+
 namespace colmap {
 
 struct SiftExtractionOptions {
@@ -103,6 +105,27 @@ struct SiftExtractionOptions {
 
   bool Check() const;
 };
+
+// Testable mirror of the options passed to the experimental SiftMetal backend.
+// Descriptor normalization is intentionally not listed here: SiftMetal returns
+// float descriptors and COLMAP applies the requested normalization afterwards.
+struct MetalSiftExtractionOptions {
+  int num_octaves = -1;
+  int scales_per_octave = 3;
+  int first_octave = -1;
+  float peak_threshold = 0.0133f;
+  float edge_threshold = 10.0f;
+  int max_num_features = 8192;
+  int max_num_orientations = 2;
+  bool upright = false;
+};
+
+bool RequiresCovariantSiftExtractor(const SiftExtractionOptions& options);
+
+std::string DescribeMetalSiftFallback(const SiftExtractionOptions& options);
+
+MetalSiftExtractionOptions CreateMetalSiftExtractionOptions(
+    const SiftExtractionOptions& options);
 
 // Create a Sift feature extractor based on the provided options. The same
 // feature extractor instance can be used to extract features for multiple

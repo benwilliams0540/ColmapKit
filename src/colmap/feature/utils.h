@@ -33,6 +33,12 @@
 
 namespace colmap {
 
+inline constexpr int kSiftUBCDescriptorNumSpatialBins = 4;
+inline constexpr int kSiftUBCDescriptorNumOrientationBins = 8;
+inline constexpr int kSiftUBCDescriptorDim =
+    kSiftUBCDescriptorNumSpatialBins * kSiftUBCDescriptorNumSpatialBins *
+    kSiftUBCDescriptorNumOrientationBins;
+
 // Convert feature keypoints to vector of points.
 std::vector<Eigen::Vector2d> FeatureKeypointsToPointsVector(
     const FeatureKeypoints& keypoints);
@@ -52,6 +58,19 @@ void L1RootNormalizeFeatureDescriptors(
 // common practice of representing SIFT vectors.
 FeatureDescriptorsData FeatureDescriptorsToUnsignedByte(
     const Eigen::Ref<const FeatureDescriptorsFloatData>& descriptors);
+
+// Return the linear descriptor index for the UBC/SiftGPU SIFT convention:
+// 4x4 spatial cells in row-major order, each with 8 orientation bins.
+Eigen::Index SiftUBCDescriptorIndex(int x, int y, int orientation_bin);
+
+// Whether the descriptor dimensionality matches the UBC/SiftGPU SIFT layout.
+bool IsValidSiftUBCDescriptorDim(Eigen::Index descriptor_dim);
+
+// VLFeat uses a different orientation-bin convention to store SIFT
+// descriptors. Transform VLFeat descriptors into the original UBC convention
+// used by COLMAP's SiftGPU path.
+FeatureDescriptorsData TransformVLFeatToUBCFeatureDescriptors(
+    const Eigen::Ref<const FeatureDescriptorsData>& vlfeat_descriptors);
 
 // Extract the descriptors corresponding to the largest-scale features.
 void ExtractTopScaleFeatures(FeatureKeypoints* keypoints,

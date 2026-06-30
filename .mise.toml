@@ -246,7 +246,7 @@ printf 'Installed Metal build: %s\n' "$COLMAP_METAL_INSTALL_DIR"
 '''
 
 [tasks."test:metal"]
-description = "Run focused Metal matcher and SIFT option tests."
+description = "Run focused Metal matcher plus hardware-free SIFT option/fallback tests."
 depends = ["configure:metal-tests"]
 run = '''
 set -eu

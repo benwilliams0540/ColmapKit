@@ -21,6 +21,9 @@ void normalizeFeatures(
         float f = features[i];
         magnitude += (f * f);
     }
+    if (magnitude <= 0) {
+        return;
+    }
     const float d = 1.0 / sqrt(magnitude);
     for (int i = 0; i < count; i++) {
         features[i] *= d;
@@ -51,7 +54,7 @@ void copyFeatures(
 
     
 int offset(int x, int y, int b) {
-    const int side = 4;
+    const int side = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH;
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
     return (y * side * bins) + (x * bins) + b;
 }
@@ -64,7 +67,7 @@ void addValue(
     int b,
     float value
 ) {
-    const int side = 4;
+    const int side = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH;
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
     if ((x < 0) || (x >= side) || (y < 0) || (y >= side)) {
         return;
@@ -125,11 +128,14 @@ kernel void siftDescriptors(
     ushort gid [[thread_position_in_grid]]
 ) {
    
-//    let octave = dog.octaves[keypoint.octave]
-    // let images = octave.gaussianImages
-    // let histogramsPerAxis = configuration.descriptorHistogramsPerAxis
-    SIFTDescriptorResult result;
     const SIFTDescriptorInput input = inputs[gid];
+    SIFTDescriptorResult result;
+    result.valid = false;
+    result.keypoint = input.keypoint;
+    result.theta = input.theta;
+    for (int i = 0; i < SIFT_DESCRIPTOR_FEATURE_COUNT; i++) {
+        result.features[i] = 0;
+    }
     
     
 //    let image = octaves[keypoint.octave].gradientImages[keypoint.scale]
@@ -140,16 +146,7 @@ kernel void siftDescriptors(
     float px = float(input.absoluteX) / parameters.delta;
     float py = float(input.absoluteY) / parameters.delta;
 
-    // Check that the keypoint is sufficiently far from the edge to include
-    // entire area of the descriptor.
-    
-    #warning("TODO: Do this check after interpolation to avoid wasting work on extracting the orientation")
-    // let diagonal = Float(2).squareRoot() * lambda * sigma
-    // let f = Float(histogramsPerAxis + 1) / Float(histogramsPerAxis)
-    // let side = Int((diagonal * f).rounded())
-    
-    //let radius = lambda * f
-    const int d = 4; // width of 2d array of histograms
+    const int d = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH;
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
     
     const float tau = 2 * M_PI_F;
@@ -165,23 +162,14 @@ kernel void siftDescriptors(
     const float histogramWidth = 3.0 * scale; // 3.0 constant from Whess (OpenSIFT)
     const int radius = histogramWidth * sqrt(2.0) * ((float)d + 1.0) * 0.5 + 0.5;
     
-//    const int minX = radius;
-//    const int minY = radius;
-//    const int maxX = parameters.width - 1 - radius;
-//    const int maxY = parameters.height - 1 - radius;
-//
-//    if (px < minX) {
-//        return;
-//    }
-//    if (py < minY) {
-//        return;
-//    }
-//    if (px > maxX) {
-//        return;
-//    }
-//    if (py > maxY) {
-//        return;
-//    }
+    const float minX = (float)radius;
+    const float minY = (float)radius;
+    const float maxX = (float)(parameters.width - 1 - radius);
+    const float maxY = (float)(parameters.height - 1 - radius);
+    if (px < minX || py < minY || px > maxX || py > maxY) {
+        results[gid] = result;
+        return;
+    }
 
     // Create histograms
     const int featureCount = d * d * bins;

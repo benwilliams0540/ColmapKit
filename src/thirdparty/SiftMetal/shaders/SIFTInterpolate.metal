@@ -14,6 +14,9 @@
 using namespace metal;
 
 
+constant float kMinHessianDeterminant = 1e-10f;
+
+
 bool isOnEdge(
     texture2d_array<float, access::read> t [[texture(0)]],
     int x,
@@ -42,7 +45,7 @@ bool isOnEdge(
     const float trace = hxx + hyy;
     const float determinant = (hxx * hyy) - (hxy * hxy);
     
-    if (determinant <= 0) {
+    if (!(determinant > kMinHessianDeterminant)) {
         // Negative determinant -> curvatures have different signs
         return true;
     }
@@ -94,9 +97,8 @@ float interpolateContrast(
     float3 alpha
 ) {
     const float3 dD = derivatives3D(t, x, y, s);
-    const float3 c = dD * alpha;
     const float v = t.read(ushort2(x, y), s).r;
-    return v + c.x * 0.5;
+    return v + 0.5 * dot(dD, alpha);
 }
 
 
@@ -164,16 +166,23 @@ float3x3 hessian3D(
 }
 
 
-float3 interpolationStep(
+bool interpolationStep(
     texture2d_array<float, access::read> t [[texture(0)]],
     int x,
     int y,
-    int scale
+    int scale,
+    thread float3 & alpha
 ) {
     const float3x3 H = hessian3D(t, x, y, scale);
-    float3x3 Hi = -1.0 * invert(H);
+    const float hessianDeterminant = determinant(H);
+    if (!(abs(hessianDeterminant) >= kMinHessianDeterminant)) {
+        return false;
+    }
+
+    const float3x3 Hi = -1.0 * invert(H);
     const float3 dD = derivatives3D(t, x, y, scale);
-    return Hi * dD;
+    alpha = Hi * dD;
+    return all(isfinite(alpha));
 }
 
 
@@ -204,9 +213,6 @@ kernel void siftInterpolate(
     
     float value = dogTextures.read(ushort2(input.x, input.y), input.scale).r;
         
-    // Note: SiftGPU does not pre-filter below threshold.
-    // Only the post-interpolation check (line 278) applies.
-
     const int maxIterations = parameters.maxIterations;
     const float maxOffset = parameters.maxOffset;
     const int width = parameters.width;
@@ -222,14 +228,20 @@ kernel void siftInterpolate(
         return;
     }
 
+    if (abs(value) < 0.8 * parameters.dogThreshold) {
+        return;
+    }
+
     bool converged = false;
     float3 alpha = float3(0);
 
     int i = 0;
     while (i < maxIterations) {
-        alpha = interpolationStep(dogTextures, x, y, scale);
+        if (!interpolationStep(dogTextures, x, y, scale, alpha)) {
+            return;
+        }
             
-        if ((abs(alpha.x) < maxOffset) && (abs(alpha.y) < maxOffset) && (abs(alpha.z) < maxOffset)) {
+        if ((abs(alpha.x) <= maxOffset) && (abs(alpha.y) <= maxOffset) && (abs(alpha.z) <= maxOffset)) {
             converged = true;
             break;
         }

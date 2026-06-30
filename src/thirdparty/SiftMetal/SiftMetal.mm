@@ -1,19 +1,12 @@
 // SiftMetal.mm - Metal-accelerated SIFT feature extraction.
 // Objective-C++ port of SIFTMetal Swift library by Luke Van In.
 
-#import <Metal/Metal.h>
-#import <Foundation/Foundation.h>
-
 #include "SiftMetal.h"
 
-// Shared C headers for Metal shader parameter structs.
-#include "include/ConvolutionSeries.h"
-#include "include/NearestNeighbor.h"
-#include "include/SIFTDescriptor.h"
-#include "include/SIFTExtrema.h"
-#include "include/SIFTInterpolate.h"
-#include "include/SIFTOrientation.h"
+#import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 
+// Shared C headers for Metal shader parameter structs.
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -21,9 +14,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "include/ConvolutionSeries.h"
+#include "include/NearestNeighbor.h"
+#include "include/SIFTDescriptor.h"
+#include "include/SIFTExtrema.h"
+#include "include/SIFTInterpolate.h"
+#include "include/SIFTOrientation.h"
 #include <mach-o/dyld.h>
 
 // Build-tree path to compiled metallib is set by CMake and used as one of
@@ -43,6 +44,55 @@ static std::string NSStringToString(NSString* string) {
   if (string == nil) return std::string();
   const char* utf8 = [string UTF8String];
   return utf8 == nullptr ? std::string() : std::string(utf8);
+}
+
+static std::string NSErrorToString(NSError* error) {
+  if (error == nil) return std::string();
+  std::ostringstream stream;
+  stream << NSStringToString([error domain]) << "(" << [error code] << ")";
+  const std::string description = NSStringToString([error localizedDescription]);
+  if (!description.empty()) {
+    stream << ": " << description;
+  }
+  const std::string failure_reason = NSStringToString([error localizedFailureReason]);
+  if (!failure_reason.empty()) {
+    stream << " reason=" << failure_reason;
+  }
+  const std::string recovery_suggestion = NSStringToString([error localizedRecoverySuggestion]);
+  if (!recovery_suggestion.empty()) {
+    stream << " suggestion=" << recovery_suggestion;
+  }
+  return stream.str();
+}
+
+static const char* StatusSeverityName(StatusSeverity severity) {
+  switch (severity) {
+    case StatusSeverity::kInfo:
+      return "info";
+    case StatusSeverity::kWarning:
+      return "warning";
+    case StatusSeverity::kError:
+      return "error";
+  }
+  return "unknown";
+}
+
+static const char* CommandBufferStatusName(MTLCommandBufferStatus status) {
+  switch (status) {
+    case MTLCommandBufferStatusNotEnqueued:
+      return "not_enqueued";
+    case MTLCommandBufferStatusEnqueued:
+      return "enqueued";
+    case MTLCommandBufferStatusCommitted:
+      return "committed";
+    case MTLCommandBufferStatusScheduled:
+      return "scheduled";
+    case MTLCommandBufferStatusCompleted:
+      return "completed";
+    case MTLCommandBufferStatusError:
+      return "error";
+  }
+  return "unknown";
 }
 
 static bool FileExists(const std::string& path) {
@@ -69,42 +119,33 @@ static std::vector<std::string> MetallibCandidatePaths() {
 
   if (NSBundle* bundle = [NSBundle mainBundle]) {
     if (NSString* resourcePath = [bundle resourcePath]) {
+      AppendPath(&paths, [resourcePath stringByAppendingPathComponent:@"sift.metallib"]);
       AppendPath(&paths,
-                 [resourcePath stringByAppendingPathComponent:
-                                   @"sift.metallib"]);
-      AppendPath(&paths,
-                 [resourcePath stringByAppendingPathComponent:
-                                   @"../Resources/sift.metallib"]);
-      AppendPath(&paths,
-                 [resourcePath stringByAppendingPathComponent:
-                                   @"../share/colmap/metal/sift.metallib"]);
+                 [resourcePath stringByAppendingPathComponent:@"../Resources/sift.metallib"]);
+      AppendPath(
+          &paths,
+          [resourcePath stringByAppendingPathComponent:@"../share/colmap/metal/sift.metallib"]);
     }
   }
 
   uint32_t executable_path_size = 0;
   _NSGetExecutablePath(nullptr, &executable_path_size);
   std::vector<char> executable_path(executable_path_size + 1, '\0');
-  if (_NSGetExecutablePath(executable_path.data(), &executable_path_size) ==
-      0) {
-    NSString* executablePath =
-        [[NSFileManager defaultManager]
-            stringWithFileSystemRepresentation:executable_path.data()
-                                        length:std::strlen(executable_path.data())];
+  if (_NSGetExecutablePath(executable_path.data(), &executable_path_size) == 0) {
+    NSString* executablePath = [[NSFileManager defaultManager]
+        stringWithFileSystemRepresentation:executable_path.data()
+                                    length:std::strlen(executable_path.data())];
     NSString* executableDir = [executablePath stringByDeletingLastPathComponent];
-    AppendPath(&paths,
-               [executableDir stringByAppendingPathComponent:@"sift.metallib"]);
-    AppendPath(&paths,
-               [executableDir stringByAppendingPathComponent:
-                                  @"../share/colmap/metal/sift.metallib"]);
-    AppendPath(&paths,
-               [executableDir stringByAppendingPathComponent:
-                                  @"../lib/sift.metallib"]);
+    AppendPath(&paths, [executableDir stringByAppendingPathComponent:@"sift.metallib"]);
+    AppendPath(
+        &paths,
+        [executableDir stringByAppendingPathComponent:@"../share/colmap/metal/sift.metallib"]);
+    AppendPath(&paths, [executableDir stringByAppendingPathComponent:@"../lib/sift.metallib"]);
   }
 
   paths.emplace_back(SIFT_METAL_BUILD_METALLIB_PATH);
 
-  paths.erase(std::remove(paths.begin(), paths.end(), std::string()),
-              paths.end());
+  paths.erase(std::remove(paths.begin(), paths.end(), std::string()), paths.end());
   paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
   return paths;
 }
@@ -131,15 +172,15 @@ static std::vector<float> GaussianWeights(float sigma) {
 // Octave: manages textures and pipelines for one octave of the pyramid.
 // ---------------------------------------------------------------------------
 struct Octave {
-  int o;                 // octave index
-  float delta;           // sampling distance
-  int width, height;     // dimensions at this octave
-  int num_scales;        // scales per octave (typically 3)
+  int o;                      // octave index
+  float delta;                // sampling distance
+  int width, height;          // dimensions at this octave
+  int num_scales;             // scales per octave (typically 3)
   std::vector<float> sigmas;  // sigma values for each gaussian
 
-  id<MTLTexture> gaussianTextures;   // 2DArray [num_scales+3]
-  id<MTLTexture> differenceTextures; // 2DArray [num_scales+2]
-  id<MTLTexture> gradientTextures;   // 2DArray, rg32Float
+  id<MTLTexture> gaussianTextures;    // 2DArray [num_scales+3]
+  id<MTLTexture> differenceTextures;  // 2DArray [num_scales+2]
+  id<MTLTexture> gradientTextures;    // 2DArray, rg32Float
 
   // Buffers for extrema detection
   id<MTLBuffer> extremaOutputBuffer;
@@ -167,7 +208,7 @@ struct Octave {
     id<MTLBuffer> paramsY;
   };
   std::vector<ConvPair> convPairs;
-  id<MTLTexture> convWorkTexture; // private storage 2DArray[1]
+  id<MTLTexture> convWorkTexture;  // private storage 2DArray[1]
 };
 
 // ---------------------------------------------------------------------------
@@ -177,17 +218,37 @@ class SiftMetalExtractorImpl {
  public:
   bool Init(const Options& opts, int max_w, int max_h);
   bool Extract(const uint8_t* data, int w, int h, ExtractResult* result);
+  const StatusReport& LastStatus() const { return last_status_; }
 
  private:
-  void SetupOctaves(int w, int h);
-  void SetupOctave(Octave& oct, int o, float delta, int w, int h,
-                   int num_scales, const std::vector<float>& sigmas);
+  bool EnsureImageLayout(int w, int h);
+  bool SetupOctaves(int w, int h);
+  bool SetupOctave(Octave& oct,
+                   int o,
+                   float delta,
+                   int w,
+                   int h,
+                   int num_scales,
+                   const std::vector<float>& sigmas);
+  void ResetStatus(const std::string& stage);
+  void AddStatusMessage(StatusSeverity severity,
+                        const std::string& stage,
+                        const std::string& message,
+                        const std::string& detail = std::string());
+  void RecordCapacityDrop(const std::string& stage,
+                          const std::string& resource,
+                          int64_t dropped,
+                          int64_t capacity,
+                          int64_t observed);
+  bool WaitForCommandBuffer(id<MTLCommandBuffer> cb, const std::string& stage);
 
   // Pipeline encoding helpers
   void EncodeGrayscaleUpload(id<MTLCommandBuffer> cb, int w, int h);
   void EncodeSeedTexture(id<MTLCommandBuffer> cb);
-  void EncodeOctave(id<MTLCommandBuffer> cb, Octave& oct,
-                    id<MTLTexture> inputTexture, bool inputIs2D);
+  bool EncodeOctave(id<MTLCommandBuffer> cb,
+                    Octave& oct,
+                    id<MTLTexture> inputTexture,
+                    bool inputIs2D);
   void EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct);
   void EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
   void EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct);
@@ -195,11 +256,11 @@ class SiftMetalExtractorImpl {
 
   // Per-octave extraction
   int ReadExtremaCount(Octave& oct);
-  void InterpolateKeypoints(Octave& oct, int extrema_count);
-  void ComputeOrientations(Octave& oct,
+  int InterpolateKeypoints(Octave& oct, int extrema_count);
+  bool ComputeOrientations(Octave& oct,
                            const std::vector<Keypoint>& keypoints,
                            std::vector<std::pair<int, float>>& oriented);
-  void ComputeDescriptors(Octave& oct,
+  bool ComputeDescriptors(Octave& oct,
                           const std::vector<Keypoint>& keypoints,
                           const std::vector<std::pair<int, float>>& oriented,
                           ExtractResult* result);
@@ -224,10 +285,10 @@ class SiftMetalExtractorImpl {
   id<MTLComputePipelineState> siftDescriptorsPipeline_;
 
   // Seed textures
-  id<MTLTexture> luminosityTexture_;  // R32Float, input size
-  id<MTLTexture> scaledTexture_;      // R32Float, seed size (2x)
-  id<MTLTexture> seedTexture_;        // R32Float, seed size (2x)
-  id<MTLTexture> seedConvWorkTexture_; // R32Float, seed size, private
+  id<MTLTexture> luminosityTexture_;    // R32Float, input size
+  id<MTLTexture> scaledTexture_;        // R32Float, seed size (2x)
+  id<MTLTexture> seedTexture_;          // R32Float, seed size (2x)
+  id<MTLTexture> seedConvWorkTexture_;  // R32Float, seed size, private
 
   // Seed Gaussian blur convolution buffers
   id<MTLBuffer> seedConvWeightsBuffer_;
@@ -246,45 +307,50 @@ class SiftMetalExtractorImpl {
 
   // Upload buffer
   id<MTLBuffer> uploadBuffer_;
+
+  StatusReport last_status_;
 };
 
 // ---------------------------------------------------------------------------
 // Pipeline creation helper
 // ---------------------------------------------------------------------------
 static id<MTLComputePipelineState> MakePipeline(id<MTLDevice> device,
-                                                 id<MTLLibrary> library,
-                                                 const char* name) {
+                                                id<MTLLibrary> library,
+                                                const char* name,
+                                                std::string* error_detail) {
+  if (error_detail != nullptr) error_detail->clear();
   NSString* nsName = [NSString stringWithUTF8String:name];
   id<MTLFunction> func = [library newFunctionWithName:nsName];
   if (!func) {
-    NSLog(@"SiftMetal: Failed to find function '%s'", name);
+    if (error_detail != nullptr) {
+      *error_detail = "Metal function not found in loaded library";
+    }
     return nil;
   }
   NSError* error = nil;
-  id<MTLComputePipelineState> ps =
-      [device newComputePipelineStateWithFunction:func error:&error];
-  if (error) {
-    NSLog(@"SiftMetal: Pipeline creation error for '%s': %@", name, error);
+  id<MTLComputePipelineState> ps = [device newComputePipelineStateWithFunction:func error:&error];
+  if (!ps && error_detail != nullptr) {
+    *error_detail = NSErrorToString(error);
+    if (error_detail->empty()) {
+      *error_detail = "Metal did not return a pipeline state or NSError";
+    }
   }
   return ps;
 }
 
-static id<MTLTexture> MakeTexture2D(id<MTLDevice> device, int w, int h,
-                                     MTLPixelFormat fmt,
-                                     MTLStorageMode storage) {
-  MTLTextureDescriptor* desc =
-      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
-                                                        width:w
-                                                       height:h
-                                                    mipmapped:NO];
+static id<MTLTexture> MakeTexture2D(
+    id<MTLDevice> device, int w, int h, MTLPixelFormat fmt, MTLStorageMode storage) {
+  MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:fmt
+                                                                                  width:w
+                                                                                 height:h
+                                                                              mipmapped:NO];
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   desc.storageMode = storage;
   return [device newTextureWithDescriptor:desc];
 }
 
-static id<MTLTexture> MakeTexture2DArray(id<MTLDevice> device, int w, int h,
-                                          int arrayLen, MTLPixelFormat fmt,
-                                          MTLStorageMode storage) {
+static id<MTLTexture> MakeTexture2DArray(
+    id<MTLDevice> device, int w, int h, int arrayLen, MTLPixelFormat fmt, MTLStorageMode storage) {
   MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
   desc.textureType = MTLTextureType2DArray;
   desc.pixelFormat = fmt;
@@ -297,29 +363,170 @@ static id<MTLTexture> MakeTexture2DArray(id<MTLDevice> device, int w, int h,
   return [device newTextureWithDescriptor:desc];
 }
 
+void SiftMetalExtractorImpl::ResetStatus(const std::string& stage) {
+  last_status_ = StatusReport();
+  last_status_.stage = stage;
+  if (device_) {
+    last_status_.device_name = NSStringToString([device_ name]);
+  }
+}
+
+void SiftMetalExtractorImpl::AddStatusMessage(StatusSeverity severity,
+                                              const std::string& stage,
+                                              const std::string& message,
+                                              const std::string& detail) {
+  StatusMessage status_message;
+  status_message.severity = severity;
+  status_message.stage = stage;
+  status_message.message = message;
+  status_message.detail = detail;
+  last_status_.messages.push_back(status_message);
+
+  if (severity == StatusSeverity::kError) {
+    last_status_.ok = false;
+    last_status_.stage = stage;
+    last_status_.message = message;
+  } else if (last_status_.message.empty() && severity == StatusSeverity::kWarning) {
+    last_status_.message = "Completed with warnings";
+  }
+
+  if (severity != StatusSeverity::kInfo) {
+    NSLog(@"SiftMetal [%s] %s: %s%s%s",
+          StatusSeverityName(severity),
+          stage.c_str(),
+          message.c_str(),
+          detail.empty() ? "" : " - ",
+          detail.c_str());
+  }
+}
+
+void SiftMetalExtractorImpl::RecordCapacityDrop(const std::string& stage,
+                                                const std::string& resource,
+                                                int64_t dropped,
+                                                int64_t capacity,
+                                                int64_t observed) {
+  if (dropped <= 0) return;
+
+  if (resource == "extrema") {
+    last_status_.capacity.dropped_extrema += dropped;
+  } else if (resource == "keypoints") {
+    last_status_.capacity.dropped_keypoints += dropped;
+  } else if (resource == "orientations") {
+    last_status_.capacity.dropped_orientations += dropped;
+  } else if (resource == "descriptors") {
+    last_status_.capacity.dropped_descriptors += dropped;
+  } else if (resource == "features") {
+    last_status_.capacity.dropped_features += dropped;
+  }
+
+  std::ostringstream detail;
+  detail << "observed=" << observed << ", capacity=" << capacity << ", dropped=" << dropped;
+  AddStatusMessage(StatusSeverity::kWarning,
+                   stage,
+                   "Dropped " + resource + " due to fixed capacity",
+                   detail.str());
+}
+
+bool SiftMetalExtractorImpl::WaitForCommandBuffer(id<MTLCommandBuffer> cb,
+                                                  const std::string& stage) {
+  if (!cb) {
+    AddStatusMessage(StatusSeverity::kError, stage, "Failed to create Metal command buffer");
+    return false;
+  }
+
+  [cb commit];
+  [cb waitUntilCompleted];
+
+  if (cb.status == MTLCommandBufferStatusCompleted) {
+    return true;
+  }
+
+  std::ostringstream detail;
+  detail << "status=" << CommandBufferStatusName(cb.status);
+  const std::string error = NSErrorToString(cb.error);
+  if (!error.empty()) {
+    detail << ", error=" << error;
+  }
+
+  AddStatusMessage(StatusSeverity::kError,
+                   stage,
+                   "Metal command buffer did not complete successfully",
+                   detail.str());
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   options_ = opts;
 
+  device_ = nil;
+  commandQueue_ = nil;
+  library_ = nil;
+  bilinearUpScalePipeline_ = nil;
+  nearestNeighborDownScalePipeline_ = nil;
+  convolutionXPipeline_ = nil;
+  convolutionYPipeline_ = nil;
+  convolutionSeriesXPipeline_ = nil;
+  convolutionSeriesYPipeline_ = nil;
+  subtractPipeline_ = nil;
+  siftGradientPipeline_ = nil;
+  siftExtremaListPipeline_ = nil;
+  siftInterpolatePipeline_ = nil;
+  siftOrientationPipeline_ = nil;
+  siftDescriptorsPipeline_ = nil;
+  luminosityTexture_ = nil;
+  scaledTexture_ = nil;
+  seedTexture_ = nil;
+  seedConvWorkTexture_ = nil;
+  seedConvWeightsBuffer_ = nil;
+  seedConvParamsBuffer_ = nil;
+  uploadBuffer_ = nil;
+  octaves_.clear();
+  input_w_ = 0;
+  input_h_ = 0;
+  seed_w_ = 0;
+  seed_h_ = 0;
+
+  ResetStatus("init");
+  last_status_.requested_max_image_width = max_w;
+  last_status_.requested_max_image_height = max_h;
+
   // Get the default Metal device.
   device_ = MTLCreateSystemDefaultDevice();
-  if (!device_) return false;
+  if (!device_) {
+    AddStatusMessage(StatusSeverity::kError, "init.device", "Metal default device is unavailable");
+    return false;
+  }
+  last_status_.device_name = NSStringToString([device_ name]);
 
   commandQueue_ = [device_ newCommandQueue];
-  if (!commandQueue_) return false;
+  if (!commandQueue_) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "init.command_queue",
+                     "Failed to create Metal command queue",
+                     "device=" + last_status_.device_name);
+    return false;
+  }
 
   // Load the pre-compiled metal library.
-  NSError* error = nil;
   std::vector<std::string> candidate_paths = MetallibCandidatePaths();
   for (const std::string& path : candidate_paths) {
-    if (!FileExists(path)) {
+    MetallibPathAttempt attempt;
+    attempt.path = path;
+    attempt.exists = FileExists(path);
+    if (!attempt.exists) {
+      last_status_.metallib_path_attempts.push_back(std::move(attempt));
       continue;
     }
-    NSURL* libURL =
-        [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+
+    NSError* error = nil;
+    NSURL* libURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
     library_ = [device_ newLibraryWithURL:libURL error:&error];
+    attempt.loaded = library_ != nil;
+    attempt.error = NSErrorToString(error);
+    last_status_.metallib_path_attempts.push_back(std::move(attempt));
     if (library_) {
       break;
     }
@@ -327,41 +534,55 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   if (!library_) {
     // Fallback: try default library.
     library_ = [device_ newDefaultLibrary];
+    AddStatusMessage(
+        library_ ? StatusSeverity::kInfo : StatusSeverity::kWarning,
+        "init.library.default",
+        library_ ? "Loaded default Metal library" : "Default Metal library was unavailable");
   }
   if (!library_) {
-    NSLog(@"SiftMetal: Failed to load Metal library: %@. Tried %zu paths.",
-          error,
-          candidate_paths.size());
+    std::ostringstream detail;
+    detail << "device=" << last_status_.device_name
+           << ", path_attempts=" << last_status_.metallib_path_attempts.size();
+    for (const MetallibPathAttempt& attempt : last_status_.metallib_path_attempts) {
+      detail << " [" << attempt.path << " exists=" << (attempt.exists ? "true" : "false");
+      if (!attempt.error.empty()) {
+        detail << " error=" << attempt.error;
+      }
+      detail << "]";
+    }
+    AddStatusMessage(
+        StatusSeverity::kError, "init.library", "Failed to load Metal library", detail.str());
     return false;
   }
 
   // Create all compute pipelines.
-  bilinearUpScalePipeline_ = MakePipeline(device_, library_, "bilinearUpScale");
-  nearestNeighborDownScalePipeline_ =
-      MakePipeline(device_, library_, "nearestNeighborDownScale");
-  convolutionXPipeline_ = MakePipeline(device_, library_, "convolutionX");
-  convolutionYPipeline_ = MakePipeline(device_, library_, "convolutionY");
-  convolutionSeriesXPipeline_ =
-      MakePipeline(device_, library_, "convolutionSeriesX");
-  convolutionSeriesYPipeline_ =
-      MakePipeline(device_, library_, "convolutionSeriesY");
-  subtractPipeline_ = MakePipeline(device_, library_, "subtract");
-  siftGradientPipeline_ = MakePipeline(device_, library_, "siftGradient");
-  siftExtremaListPipeline_ =
-      MakePipeline(device_, library_, "siftExtremaList");
-  siftInterpolatePipeline_ =
-      MakePipeline(device_, library_, "siftInterpolate");
-  siftOrientationPipeline_ =
-      MakePipeline(device_, library_, "siftOrientation");
-  siftDescriptorsPipeline_ =
-      MakePipeline(device_, library_, "siftDescriptors");
+  bool pipeline_ok = true;
+  const auto make_pipeline = [&](const char* name) -> id<MTLComputePipelineState> {
+    std::string error_detail;
+    id<MTLComputePipelineState> pipeline = MakePipeline(device_, library_, name, &error_detail);
+    if (pipeline == nil) {
+      pipeline_ok = false;
+      AddStatusMessage(StatusSeverity::kError,
+                       std::string("init.pipeline.") + name,
+                       "Failed to create Metal compute pipeline",
+                       error_detail);
+    }
+    return pipeline;
+  };
+  bilinearUpScalePipeline_ = make_pipeline("bilinearUpScale");
+  nearestNeighborDownScalePipeline_ = make_pipeline("nearestNeighborDownScale");
+  convolutionXPipeline_ = make_pipeline("convolutionX");
+  convolutionYPipeline_ = make_pipeline("convolutionY");
+  convolutionSeriesXPipeline_ = make_pipeline("convolutionSeriesX");
+  convolutionSeriesYPipeline_ = make_pipeline("convolutionSeriesY");
+  subtractPipeline_ = make_pipeline("subtract");
+  siftGradientPipeline_ = make_pipeline("siftGradient");
+  siftExtremaListPipeline_ = make_pipeline("siftExtremaList");
+  siftInterpolatePipeline_ = make_pipeline("siftInterpolate");
+  siftOrientationPipeline_ = make_pipeline("siftOrientation");
+  siftDescriptorsPipeline_ = make_pipeline("siftDescriptors");
 
-  if (!bilinearUpScalePipeline_ || !nearestNeighborDownScalePipeline_ ||
-      !convolutionXPipeline_ || !convolutionYPipeline_ ||
-      !convolutionSeriesXPipeline_ || !convolutionSeriesYPipeline_ ||
-      !subtractPipeline_ || !siftGradientPipeline_ ||
-      !siftExtremaListPipeline_ || !siftInterpolatePipeline_ ||
-      !siftOrientationPipeline_ || !siftDescriptorsPipeline_) {
+  if (!pipeline_ok) {
     return false;
   }
 
@@ -372,74 +593,47 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
     delta_min_ = 1.0f;
   }
 
-  input_w_ = max_w;
-  input_h_ = max_h;
-  seed_w_ = static_cast<int>(float(max_w) / delta_min_);
-  seed_h_ = static_cast<int>(float(max_h) / delta_min_);
-
-  // Create textures for the seed stage.
-  luminosityTexture_ = MakeTexture2D(device_, max_w, max_h,
-                                      MTLPixelFormatR32Float,
-                                      MTLStorageModeShared);
-  scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR32Float,
-                                  MTLStorageModeShared);
-  seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                MTLPixelFormatR32Float,
-                                MTLStorageModeShared);
-  seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                        MTLPixelFormatR32Float,
-                                        MTLStorageModePrivate);
-
   // Compute seed Gaussian blur kernel.
-  float sigma_seed = std::sqrt(sigma_min_ * sigma_min_ -
-                                sigma_input_ * sigma_input_) / delta_min_;
+  float sigma_seed = std::sqrt(sigma_min_ * sigma_min_ - sigma_input_ * sigma_input_) / delta_min_;
   auto seedWeights = GaussianWeights(sigma_seed);
-  seedConvWeightsBuffer_ =
-      [device_ newBufferWithBytes:seedWeights.data()
-                           length:seedWeights.size() * sizeof(float)
-                          options:MTLResourceStorageModeShared];
+  seedConvWeightsBuffer_ = [device_ newBufferWithBytes:seedWeights.data()
+                                                length:seedWeights.size() * sizeof(float)
+                                               options:MTLResourceStorageModeShared];
   uint32_t seedWeightCount = static_cast<uint32_t>(seedWeights.size());
-  seedConvParamsBuffer_ =
-      [device_ newBufferWithBytes:&seedWeightCount
-                           length:sizeof(uint32_t)
-                          options:MTLResourceStorageModeShared];
+  seedConvParamsBuffer_ = [device_ newBufferWithBytes:&seedWeightCount
+                                               length:sizeof(uint32_t)
+                                              options:MTLResourceStorageModeShared];
+  if (!seedConvWeightsBuffer_ || !seedConvParamsBuffer_) {
+    AddStatusMessage(
+        StatusSeverity::kError, "init.resources", "Failed to allocate seed convolution buffers");
+    return false;
+  }
 
-  // Upload buffer large enough for max image.
-  size_t maxPixels = (size_t)max_w * max_h;
-  uploadBuffer_ =
-      [device_ newBufferWithLength:maxPixels * sizeof(float)
-                           options:MTLResourceStorageModeShared];
-
-  // Setup octaves.
-  SetupOctaves(max_w, max_h);
-
+  last_status_.message = "Initialized Metal SIFT runtime";
   return true;
 }
 
 // ---------------------------------------------------------------------------
 // SetupOctaves
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
+bool SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
   int num_octaves = options_.num_octaves;
   if (num_octaves <= 0) {
     // Match SiftGPU's octave count: floor(log2(min(w,h))) - 3
     // But applied to the seed image dimensions (after upscaling).
-    int seed_min = std::min(
-        static_cast<int>(float(w) / delta_min_),
-        static_cast<int>(float(h) / delta_min_));
-    num_octaves = static_cast<int>(
-        std::floor(std::log2(float(seed_min)))) - 3;
+    int seed_min =
+        std::min(static_cast<int>(float(w) / delta_min_), static_cast<int>(float(h) / delta_min_));
+    num_octaves = static_cast<int>(std::floor(std::log2(float(seed_min)))) - 3;
     num_octaves = std::max(1, num_octaves);
   }
 
-  octaves_.resize(num_octaves);
+  octaves_.clear();
+  octaves_.reserve(num_octaves);
   for (int o = 0; o < num_octaves; ++o) {
     float delta = delta_min_ * std::pow(2.0f, float(o));
     int ow = static_cast<int>(float(w) / delta);
     int oh = static_cast<int>(float(h) / delta);
     if (ow < 8 || oh < 8) {
-      octaves_.resize(o);
       break;
     }
 
@@ -451,13 +645,23 @@ void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
       sigmas.push_back(ratio * sigma_min_ * scale);
     }
 
-    SetupOctave(octaves_[o], o, delta, ow, oh, ns, sigmas);
+    Octave oct;
+    if (!SetupOctave(oct, o, delta, ow, oh, ns, sigmas)) {
+      octaves_.clear();
+      return false;
+    }
+    octaves_.push_back(std::move(oct));
   }
+  return true;
 }
 
-void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
-                                          int w, int h, int num_scales,
-                                          const std::vector<float>& sigmas) {
+bool SiftMetalExtractorImpl::SetupOctave(Octave& oct,
+                                         int o,
+                                         float delta,
+                                         int w,
+                                         int h,
+                                         int num_scales,
+                                         const std::vector<float>& sigmas) {
   oct.o = o;
   oct.delta = delta;
   oct.width = w;
@@ -468,19 +672,24 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
   int numGaussians = num_scales + 3;
   int numDifferences = num_scales + 2;
 
-  oct.gaussianTextures = MakeTexture2DArray(
-      device_, w, h, numGaussians, MTLPixelFormatR32Float,
-      MTLStorageModeShared);
+  oct.gaussianTextures =
+      MakeTexture2DArray(device_, w, h, numGaussians, MTLPixelFormatR32Float, MTLStorageModeShared);
   oct.differenceTextures = MakeTexture2DArray(
-      device_, w, h, numDifferences, MTLPixelFormatR32Float,
-      MTLStorageModeShared);
+      device_, w, h, numDifferences, MTLPixelFormatR32Float, MTLStorageModeShared);
   oct.gradientTextures = MakeTexture2DArray(
-      device_, w, h, numGaussians, MTLPixelFormatRG32Float,
-      MTLStorageModeShared);
+      device_, w, h, numGaussians, MTLPixelFormatRG32Float, MTLStorageModeShared);
 
   // Convolution work texture (single-slice private).
-  oct.convWorkTexture = MakeTexture2DArray(
-      device_, w, h, 1, MTLPixelFormatR32Float, MTLStorageModePrivate);
+  oct.convWorkTexture =
+      MakeTexture2DArray(device_, w, h, 1, MTLPixelFormatR32Float, MTLStorageModePrivate);
+  if (!oct.gaussianTextures || !oct.differenceTextures || !oct.gradientTextures ||
+      !oct.convWorkTexture) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave",
+                     "Failed to allocate octave textures",
+                     "octave=" + std::to_string(o));
+    return false;
+  }
 
   // Build convolution parameter buffers for Gaussian series.
   oct.convPairs.resize(numGaussians - 1);
@@ -495,124 +704,186 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
     paramsX.inputDepth = static_cast<int32_t>(s - 1);
     paramsX.outputDepth = 0;
     paramsX.count = static_cast<int32_t>(weights.size());
-    std::memcpy(paramsX.weights, weights.data(),
-                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) *
-                    sizeof(float));
-    oct.convPairs[s - 1].paramsX =
-        [device_ newBufferWithBytes:&paramsX
-                             length:sizeof(ConvolutionParameters)
-                            options:MTLResourceStorageModeShared];
+    std::memcpy(paramsX.weights,
+                weights.data(),
+                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) * sizeof(float));
+    oct.convPairs[s - 1].paramsX = [device_ newBufferWithBytes:&paramsX
+                                                        length:sizeof(ConvolutionParameters)
+                                                       options:MTLResourceStorageModeShared];
 
     // Y pass: read from work slice [0], write to slice [s]
     ConvolutionParameters paramsY = {};
     paramsY.inputDepth = 0;
     paramsY.outputDepth = static_cast<int32_t>(s);
     paramsY.count = static_cast<int32_t>(weights.size());
-    std::memcpy(paramsY.weights, weights.data(),
-                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) *
-                    sizeof(float));
-    oct.convPairs[s - 1].paramsY =
-        [device_ newBufferWithBytes:&paramsY
-                             length:sizeof(ConvolutionParameters)
-                            options:MTLResourceStorageModeShared];
+    std::memcpy(paramsY.weights,
+                weights.data(),
+                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) * sizeof(float));
+    oct.convPairs[s - 1].paramsY = [device_ newBufferWithBytes:&paramsY
+                                                        length:sizeof(ConvolutionParameters)
+                                                       options:MTLResourceStorageModeShared];
+    if (!oct.convPairs[s - 1].paramsX || !oct.convPairs[s - 1].paramsY) {
+      AddStatusMessage(StatusSeverity::kError,
+                       "layout.octave.convolution",
+                       "Failed to allocate octave convolution buffers",
+                       "octave=" + std::to_string(o) + ", scale=" + std::to_string(s));
+      return false;
+    }
   }
 
   // Extrema buffers
-  oct.extremaOutputBuffer =
-      [device_ newBufferWithLength:kMaxExtrema * sizeof(SIFTExtremaResult)
-                           options:MTLResourceStorageModeShared];
-  oct.extremaIndexBuffer =
-      [device_ newBufferWithLength:sizeof(uint32_t)
-                           options:MTLResourceStorageModeShared];
-  oct.extremaParamsBuffer =
-      [device_ newBufferWithLength:sizeof(SIFTExtremaParameters)
-                           options:MTLResourceStorageModeShared];
-  auto* extremaParams =
-      static_cast<SIFTExtremaParameters*>(oct.extremaParamsBuffer.contents);
+  oct.extremaOutputBuffer = [device_ newBufferWithLength:kMaxExtrema * sizeof(SIFTExtremaResult)
+                                                 options:MTLResourceStorageModeShared];
+  oct.extremaIndexBuffer = [device_ newBufferWithLength:sizeof(uint32_t)
+                                                options:MTLResourceStorageModeShared];
+  oct.extremaParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTExtremaParameters)
+                                                 options:MTLResourceStorageModeShared];
+  if (!oct.extremaOutputBuffer || !oct.extremaIndexBuffer || !oct.extremaParamsBuffer) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave.extrema",
+                     "Failed to allocate extrema buffers",
+                     "octave=" + std::to_string(o));
+    return false;
+  }
+  auto* extremaParams = static_cast<SIFTExtremaParameters*>(oct.extremaParamsBuffer.contents);
   extremaParams->outputCapacity = static_cast<uint32_t>(kMaxExtrema);
 
   // Interpolation buffers
   oct.interpolateInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
-                                       sizeof(SIFTInterpolateInputKeypoint)
+      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTInterpolateInputKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.interpolateOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
-                                       sizeof(SIFTInterpolateOutputKeypoint)
+      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTInterpolateOutputKeypoint)
                            options:MTLResourceStorageModeShared];
-  oct.interpolateParamsBuffer =
-      [device_ newBufferWithLength:sizeof(SIFTInterpolateParameters)
-                           options:MTLResourceStorageModeShared];
+  oct.interpolateParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTInterpolateParameters)
+                                                     options:MTLResourceStorageModeShared];
+  if (!oct.interpolateInputBuffer || !oct.interpolateOutputBuffer || !oct.interpolateParamsBuffer) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave.interpolate",
+                     "Failed to allocate interpolation buffers",
+                     "octave=" + std::to_string(o));
+    return false;
+  }
 
   // Orientation buffers
   oct.orientationInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
-                                       sizeof(SIFTOrientationKeypoint)
+      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTOrientationKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.orientationOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
-                                       sizeof(SIFTOrientationResult)
+      [device_ newBufferWithLength:kMaxKeypoints * sizeof(SIFTOrientationResult)
                            options:MTLResourceStorageModeShared];
-  oct.orientationParamsBuffer =
-      [device_ newBufferWithLength:sizeof(SIFTOrientationParameters)
-                           options:MTLResourceStorageModeShared];
+  oct.orientationParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTOrientationParameters)
+                                                     options:MTLResourceStorageModeShared];
+  if (!oct.orientationInputBuffer || !oct.orientationOutputBuffer || !oct.orientationParamsBuffer) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave.orientation",
+                     "Failed to allocate orientation buffers",
+                     "octave=" + std::to_string(o));
+    return false;
+  }
 
   // Descriptor buffers
   oct.descriptorInputBuffer =
       [device_ newBufferWithLength:kMaxDescriptors * sizeof(SIFTDescriptorInput)
                            options:MTLResourceStorageModeShared];
   oct.descriptorOutputBuffer =
-      [device_ newBufferWithLength:kMaxDescriptors *
-                                       sizeof(SIFTDescriptorResult)
+      [device_ newBufferWithLength:kMaxDescriptors * sizeof(SIFTDescriptorResult)
                            options:MTLResourceStorageModeShared];
-  oct.descriptorParamsBuffer =
-      [device_ newBufferWithLength:sizeof(SIFTDescriptorParameters)
-                           options:MTLResourceStorageModeShared];
+  oct.descriptorParamsBuffer = [device_ newBufferWithLength:sizeof(SIFTDescriptorParameters)
+                                                    options:MTLResourceStorageModeShared];
+  if (!oct.descriptorInputBuffer || !oct.descriptorOutputBuffer || !oct.descriptorParamsBuffer) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.octave.descriptor",
+                     "Failed to allocate descriptor buffers",
+                     "octave=" + std::to_string(o));
+    return false;
+  }
+  return true;
+}
+
+bool SiftMetalExtractorImpl::EnsureImageLayout(int w, int h) {
+  const int seed_w = static_cast<int>(float(w) / delta_min_);
+  const int seed_h = static_cast<int>(float(h) / delta_min_);
+  last_status_.image_width = w;
+  last_status_.image_height = h;
+  last_status_.seed_width = seed_w;
+  last_status_.seed_height = seed_h;
+
+  if (w == input_w_ && h == input_h_ && luminosityTexture_ && scaledTexture_ && seedTexture_ &&
+      seedConvWorkTexture_ && uploadBuffer_) {
+    return true;
+  }
+
+  input_w_ = w;
+  input_h_ = h;
+  seed_w_ = seed_w;
+  seed_h_ = seed_h;
+
+  luminosityTexture_ = MakeTexture2D(device_, w, h, MTLPixelFormatR32Float, MTLStorageModeShared);
+  scaledTexture_ =
+      MakeTexture2D(device_, seed_w_, seed_h_, MTLPixelFormatR32Float, MTLStorageModeShared);
+  seedTexture_ =
+      MakeTexture2D(device_, seed_w_, seed_h_, MTLPixelFormatR32Float, MTLStorageModeShared);
+  seedConvWorkTexture_ =
+      MakeTexture2D(device_, seed_w_, seed_h_, MTLPixelFormatR32Float, MTLStorageModePrivate);
+
+  uploadBuffer_ = [device_ newBufferWithLength:static_cast<size_t>(w) * h * sizeof(float)
+                                       options:MTLResourceStorageModeShared];
+
+  if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ || !seedConvWorkTexture_ ||
+      !uploadBuffer_) {
+    std::ostringstream detail;
+    detail << "image=" << w << "x" << h << ", seed=" << seed_w_ << "x" << seed_h_;
+    AddStatusMessage(StatusSeverity::kError,
+                     "layout.seed",
+                     "Failed to allocate image layout resources",
+                     detail.str());
+    return false;
+  }
+
+  return SetupOctaves(w, h);
 }
 
 // ---------------------------------------------------------------------------
 // Extract
 // ---------------------------------------------------------------------------
-bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
-                                      ExtractResult* result) {
+bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h, ExtractResult* result) {
+  ResetStatus("extract");
+  last_status_.image_width = w;
+  last_status_.image_height = h;
+
   if (data == nullptr || result == nullptr || w <= 0 || h <= 0) {
+    AddStatusMessage(StatusSeverity::kError,
+                     "extract.input",
+                     "Invalid image input",
+                     "data=" + std::string(data == nullptr ? "null" : "set") +
+                         ", result=" + std::string(result == nullptr ? "null" : "set") +
+                         ", width=" + std::to_string(w) + ", height=" + std::to_string(h));
+    if (result != nullptr) {
+      result->status = last_status_;
+    }
     return false;
   }
 
   result->keypoints.clear();
   result->descriptors.clear();
+  result->status = StatusReport();
 
-  // Recreate textures if image size changed.
-  if (w != input_w_ || h != input_h_) {
-    input_w_ = w;
-    input_h_ = h;
-    seed_w_ = static_cast<int>(float(w) / delta_min_);
-    seed_h_ = static_cast<int>(float(h) / delta_min_);
+  if (!device_ || !commandQueue_ || !library_) {
+    AddStatusMessage(
+        StatusSeverity::kError, "extract.runtime", "Metal SIFT runtime is not initialized");
+    result->status = last_status_;
+    return false;
+  }
 
-    luminosityTexture_ = MakeTexture2D(device_, w, h,
-                                        MTLPixelFormatR32Float,
-                                        MTLStorageModeShared);
-    scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                    MTLPixelFormatR32Float,
-                                    MTLStorageModeShared);
-    seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR32Float,
-                                  MTLStorageModeShared);
-    seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                          MTLPixelFormatR32Float,
-                                          MTLStorageModePrivate);
-
-    size_t maxPixels = (size_t)w * h;
-    if (uploadBuffer_.length < maxPixels * sizeof(float)) {
-      uploadBuffer_ =
-          [device_ newBufferWithLength:maxPixels * sizeof(float)
-                               options:MTLResourceStorageModeShared];
-    }
-
-    SetupOctaves(w, h);
+  if (!EnsureImageLayout(w, h)) {
+    result->status = last_status_;
+    return false;
   }
 
   if (octaves_.empty()) {
+    last_status_.message = "Extraction completed without octaves";
+    result->status = last_status_;
     return true;
   }
 
@@ -634,16 +905,23 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     EncodeSeedTexture(cb);
 
     // First octave reads from seed texture (2D).
-    EncodeOctave(cb, octaves_[0], seedTexture_, true);
+    if (!EncodeOctave(cb, octaves_[0], seedTexture_, true)) {
+      result->status = last_status_;
+      return false;
+    }
 
     // Subsequent octaves read from previous octave's Gaussian textures.
     for (size_t i = 1; i < octaves_.size(); ++i) {
-      EncodeOctave(cb, octaves_[i],
-                   octaves_[i - 1].gaussianTextures, false);
+      if (!EncodeOctave(cb, octaves_[i], octaves_[i - 1].gaussianTextures, false)) {
+        result->status = last_status_;
+        return false;
+      }
     }
 
-    [cb commit];
-    [cb waitUntilCompleted];
+    if (!WaitForCommandBuffer(cb, "extract.scale_space")) {
+      result->status = last_status_;
+      return false;
+    }
   }
 
   // Phase 2: For each octave, read extrema, interpolate, orientate, describe.
@@ -651,15 +929,19 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     int extremaCount = ReadExtremaCount(oct);
     if (extremaCount <= 0) continue;
 
-    InterpolateKeypoints(oct, extremaCount);
+    int interpolatedCount = InterpolateKeypoints(oct, extremaCount);
+    if (interpolatedCount < 0) {
+      result->status = last_status_;
+      return false;
+    }
 
     // Read interpolated keypoints.
-    auto* interpOut = static_cast<SIFTInterpolateOutputKeypoint*>(
-        oct.interpolateOutputBuffer.contents);
+    auto* interpOut =
+        static_cast<SIFTInterpolateOutputKeypoint*>(oct.interpolateOutputBuffer.contents);
     float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
 
     std::vector<Keypoint> octKeypoints;
-    for (int k = 0; k < extremaCount; ++k) {
+    for (int k = 0; k < interpolatedCount; ++k) {
       auto& p = interpOut[k];
       if (!p.converged) continue;
 
@@ -667,35 +949,49 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
       kp.x = p.absoluteX;
       kp.y = p.absoluteY;
       kp.sigma = oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
-      kp.orientation = 0; // Will be set during orientation pass.
+      kp.orientation = 0;  // Will be set during orientation pass.
       octKeypoints.push_back(kp);
     }
 
     if (octKeypoints.empty()) continue;
 
     // Compute orientations.
-    std::vector<std::pair<int, float>> oriented; // (keypoint_index, theta)
-    ComputeOrientations(oct, octKeypoints, oriented);
+    std::vector<std::pair<int, float>> oriented;  // (keypoint_index, theta)
+    if (!ComputeOrientations(oct, octKeypoints, oriented)) {
+      result->status = last_status_;
+      return false;
+    }
 
     if (oriented.empty()) continue;
 
     // Compute descriptors.
-    ComputeDescriptors(oct, octKeypoints, oriented, result);
+    if (!ComputeDescriptors(oct, octKeypoints, oriented, result)) {
+      result->status = last_status_;
+      return false;
+    }
   }
 
   // Sort by scale (descending) and truncate to max_num_features.
-  if (options_.max_num_features > 0 &&
-      (int)result->keypoints.size() > options_.max_num_features) {
+  if (options_.max_num_features > 0 && (int)result->keypoints.size() > options_.max_num_features) {
+    const int64_t dropped_features =
+        static_cast<int64_t>(result->keypoints.size()) - options_.max_num_features;
+    last_status_.capacity.dropped_features += dropped_features;
+    std::ostringstream detail;
+    detail << "observed=" << result->keypoints.size()
+           << ", max_num_features=" << options_.max_num_features
+           << ", dropped=" << dropped_features;
+    AddStatusMessage(StatusSeverity::kWarning,
+                     "extract.feature_limit",
+                     "Dropped features due to max_num_features limit",
+                     detail.str());
     // Create index array, sort by sigma descending.
     std::vector<int> indices(result->keypoints.size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(),
-              [&](int a, int b) {
-                return result->keypoints[a].sigma >
-                       result->keypoints[b].sigma;
-              });
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+      return result->keypoints[a].sigma > result->keypoints[b].sigma;
+    });
     indices.resize(options_.max_num_features);
-    std::sort(indices.begin(), indices.end()); // Restore order.
+    std::sort(indices.begin(), indices.end());  // Restore order.
 
     std::vector<Keypoint> newKp;
     std::vector<float> newDesc;
@@ -711,6 +1007,10 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     result->descriptors = std::move(newDesc);
   }
 
+  if (last_status_.message.empty()) {
+    last_status_.message = "Extraction completed";
+  }
+  result->status = last_status_;
   return true;
 }
 
@@ -725,9 +1025,7 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
     [enc setTexture:scaledTexture_ atIndex:0];
     [enc setTexture:luminosityTexture_ atIndex:1];
     MTLSize tg = {16, 16, 1};
-    MTLSize grid = {
-        (NSUInteger)(seed_w_ + 15) / 16,
-        (NSUInteger)(seed_h_ + 15) / 16, 1};
+    MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16, (NSUInteger)(seed_h_ + 15) / 16, 1};
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
   } else {
@@ -746,8 +1044,7 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
     [enc setBuffer:seedConvWeightsBuffer_ offset:0 atIndex:0];
     [enc setBuffer:seedConvParamsBuffer_ offset:0 atIndex:1];
     MTLSize tg = {16, 16, 1};
-    MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16,
-                    (NSUInteger)(seed_h_ + 15) / 16, 1};
+    MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16, (NSUInteger)(seed_h_ + 15) / 16, 1};
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
   }
@@ -759,8 +1056,7 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
     [enc setBuffer:seedConvWeightsBuffer_ offset:0 atIndex:0];
     [enc setBuffer:seedConvParamsBuffer_ offset:0 atIndex:1];
     MTLSize tg = {16, 16, 1};
-    MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16,
-                    (NSUInteger)(seed_h_ + 15) / 16, 1};
+    MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16, (NSUInteger)(seed_h_ + 15) / 16, 1};
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
   }
@@ -769,10 +1065,10 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
 // ---------------------------------------------------------------------------
 // EncodeOctave
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
-                                           Octave& oct,
-                                           id<MTLTexture> inputTexture,
-                                           bool inputIs2D) {
+bool SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
+                                          Octave& oct,
+                                          id<MTLTexture> inputTexture,
+                                          bool inputIs2D) {
   int w = oct.width;
   int h = oct.height;
 
@@ -784,22 +1080,33 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
       [blit copyFromTexture:inputTexture
                 sourceSlice:0
                 sourceLevel:0
-              sourceOrigin:MTLOriginMake(0, 0, 0)
-                sourceSize:MTLSizeMake(w, h, 1)
-                 toTexture:oct.gaussianTextures
-          destinationSlice:0
-          destinationLevel:0
-         destinationOrigin:MTLOriginMake(0, 0, 0)];
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(w, h, 1)
+                  toTexture:oct.gaussianTextures
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
       [blit endEncoding];
+    } else {
+      std::ostringstream detail;
+      detail << "input=" << (inputTexture ? inputTexture.width : 0) << "x"
+             << (inputTexture ? inputTexture.height : 0) << ", octave=" << w << "x" << h;
+      AddStatusMessage(StatusSeverity::kError,
+                       "extract.scale_space.octave_" + std::to_string(oct.o),
+                       "Octave seed texture dimensions do not match",
+                       detail.str());
+      return false;
     }
   } else {
     // Nearest-neighbor downscale from previous octave's gaussian[num_scales].
-    auto* params = static_cast<NearestNeighborScaleParameters*>(
-        [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
-                             options:MTLResourceStorageModeShared].contents);
-    id<MTLBuffer> paramsBuf =
-        [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
-                             options:MTLResourceStorageModeShared];
+    id<MTLBuffer> paramsBuf = [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
+                                                   options:MTLResourceStorageModeShared];
+    if (!paramsBuf) {
+      AddStatusMessage(StatusSeverity::kError,
+                       "extract.scale_space.octave_" + std::to_string(oct.o),
+                       "Failed to allocate octave downscale parameters");
+      return false;
+    }
     auto* p = static_cast<NearestNeighborScaleParameters*>(paramsBuf.contents);
     p->inputSlice = oct.num_scales;
     p->outputSlice = 0;
@@ -810,8 +1117,7 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
     [enc setTexture:inputTexture atIndex:1];
     [enc setBuffer:paramsBuf offset:0 atIndex:0];
     MTLSize tg = {16, 16, 1};
-    MTLSize grid = {(NSUInteger)(w + 15) / 16,
-                    (NSUInteger)(h + 15) / 16, 1};
+    MTLSize grid = {(NSUInteger)(w + 15) / 16, (NSUInteger)(h + 15) / 16, 1};
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
   }
@@ -824,15 +1130,14 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
   EncodeGradients(cb, oct);
   // Extrema detection.
   EncodeExtrema(cb, oct);
+  return true;
 }
 
-void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
-                                                    Octave& oct) {
+void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   MTLSize tg = {16, 16, 1};
-  MTLSize grid = {(NSUInteger)(w + 15) / 16,
-                  (NSUInteger)(h + 15) / 16, 1};
+  MTLSize grid = {(NSUInteger)(w + 15) / 16, (NSUInteger)(h + 15) / 16, 1};
 
   for (auto& pair : oct.convPairs) {
     // X pass: gaussian → work
@@ -858,8 +1163,7 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
   }
 }
 
-void SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
-                                                 Octave& oct) {
+void SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   int numDiff = oct.num_scales + 2;
@@ -869,15 +1173,12 @@ void SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
   [enc setTexture:oct.differenceTextures atIndex:0];
   [enc setTexture:oct.gaussianTextures atIndex:1];
   MTLSize tg = {8, 8, 8};
-  MTLSize grid = {(NSUInteger)(w + 7) / 8,
-                  (NSUInteger)(h + 7) / 8,
-                  (NSUInteger)(numDiff + 7) / 8};
+  MTLSize grid = {(NSUInteger)(w + 7) / 8, (NSUInteger)(h + 7) / 8, (NSUInteger)(numDiff + 7) / 8};
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
   [enc endEncoding];
 }
 
-void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
-                                               Octave& oct) {
+void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   int arrayLen = oct.num_scales + 3;
@@ -887,15 +1188,12 @@ void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
   [enc setTexture:oct.gradientTextures atIndex:0];
   [enc setTexture:oct.gaussianTextures atIndex:1];
   MTLSize tg = {8, 8, 8};
-  MTLSize grid = {(NSUInteger)(w + 7) / 8,
-                  (NSUInteger)(h + 7) / 8,
-                  (NSUInteger)(arrayLen + 7) / 8};
+  MTLSize grid = {(NSUInteger)(w + 7) / 8, (NSUInteger)(h + 7) / 8, (NSUInteger)(arrayLen + 7) / 8};
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
   [enc endEncoding];
 }
 
-void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
-                                             Octave& oct) {
+void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   int numDiff = oct.num_scales + 2;
@@ -914,9 +1212,7 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
   NSUInteger maxThreads = siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup;
   NSUInteger dim = (NSUInteger)std::cbrt((double)maxThreads);
   MTLSize tg = {dim, dim, dim};
-  MTLSize gridSize = {(NSUInteger)(w - 2),
-                      (NSUInteger)(h - 2),
-                      (NSUInteger)(numDiff - 2)};
+  MTLSize gridSize = {(NSUInteger)(w - 2), (NSUInteger)(h - 2), (NSUInteger)(numDiff - 2)};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 }
@@ -926,8 +1222,16 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
 // ---------------------------------------------------------------------------
 int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
   auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
-  int count =
-      static_cast<int>(std::min(*idx, static_cast<uint32_t>(kMaxExtrema)));
+  const uint32_t observed = *idx;
+  last_status_.capacity.detected_extrema += observed;
+  if (observed > static_cast<uint32_t>(kMaxExtrema)) {
+    RecordCapacityDrop("extract.extrema.octave_" + std::to_string(oct.o),
+                       "extrema",
+                       observed - static_cast<uint32_t>(kMaxExtrema),
+                       kMaxExtrema,
+                       observed);
+  }
+  int count = static_cast<int>(std::min(observed, static_cast<uint32_t>(kMaxExtrema)));
   *idx = 0;
   return count;
 }
@@ -935,15 +1239,19 @@ int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
 // ---------------------------------------------------------------------------
 // InterpolateKeypoints
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
-                                                    int extremaCount) {
+int SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct, int extremaCount) {
   int count = std::min(extremaCount, kMaxKeypoints);
+  if (extremaCount > kMaxKeypoints) {
+    RecordCapacityDrop("extract.interpolate.octave_" + std::to_string(oct.o),
+                       "keypoints",
+                       extremaCount - kMaxKeypoints,
+                       kMaxKeypoints,
+                       extremaCount);
+  }
 
   // Copy extrema to interpolation input buffer.
-  auto* extrema =
-      static_cast<SIFTExtremaResult*>(oct.extremaOutputBuffer.contents);
-  auto* interpIn = static_cast<SIFTInterpolateInputKeypoint*>(
-      oct.interpolateInputBuffer.contents);
+  auto* extrema = static_cast<SIFTExtremaResult*>(oct.extremaOutputBuffer.contents);
+  auto* interpIn = static_cast<SIFTInterpolateInputKeypoint*>(oct.interpolateInputBuffer.contents);
   for (int i = 0; i < count; ++i) {
     interpIn[i].x = extrema[i].x;
     interpIn[i].y = extrema[i].y;
@@ -951,8 +1259,7 @@ void SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
   }
 
   // Set interpolation parameters.
-  auto* params = static_cast<SIFTInterpolateParameters*>(
-      oct.interpolateParamsBuffer.contents);
+  auto* params = static_cast<SIFTInterpolateParameters*>(oct.interpolateParamsBuffer.contents);
   params->dogThreshold = options_.peak_threshold;
   params->maxIterations = 5;
   params->maxOffset = 0.6f;
@@ -970,23 +1277,24 @@ void SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
   [enc setBuffer:oct.interpolateParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.differenceTextures atIndex:0];
 
-  NSUInteger maxThreads =
-      siftInterpolatePipeline_.maxTotalThreadsPerThreadgroup;
+  NSUInteger maxThreads = siftInterpolatePipeline_.maxTotalThreadsPerThreadgroup;
   MTLSize tg = {maxThreads, 1, 1};
   MTLSize gridSize = {(NSUInteger)count, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  if (!WaitForCommandBuffer(cb, "extract.interpolate.octave_" + std::to_string(oct.o))) {
+    return -1;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
 // ComputeOrientations
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::ComputeOrientations(
-    Octave& oct, const std::vector<Keypoint>& keypoints,
-    std::vector<std::pair<int, float>>& oriented) {
+bool SiftMetalExtractorImpl::ComputeOrientations(Octave& oct,
+                                                 const std::vector<Keypoint>& keypoints,
+                                                 std::vector<std::pair<int, float>>& oriented) {
   oriented.clear();
 
   float delta = oct.delta;
@@ -996,26 +1304,29 @@ void SiftMetalExtractorImpl::ComputeOrientations(
   float maxX = float(oct.width - 2);
   float maxY = float(oct.height - 2);
 
-  auto* params =
-      static_cast<SIFTOrientationParameters*>(oct.orientationParamsBuffer.contents);
+  auto* params = static_cast<SIFTOrientationParameters*>(oct.orientationParamsBuffer.contents);
   params->delta = delta;
   params->lambda = lambda;
   params->orientationThreshold = orientThreshold;
 
-  auto* orientIn = static_cast<SIFTOrientationKeypoint*>(
-      oct.orientationInputBuffer.contents);
+  auto* orientIn = static_cast<SIFTOrientationKeypoint*>(oct.orientationInputBuffer.contents);
 
   int validCount = 0;
-  std::vector<int> validIndices;
-  for (int k = 0; k < (int)keypoints.size() && validCount < kMaxKeypoints; ++k) {
+  int droppedByCapacity = 0;
+  for (int k = 0; k < (int)keypoints.size(); ++k) {
     const auto& kp = keypoints[k];
     float x = kp.x / delta;
     float y = kp.y / delta;
     float sigma = kp.sigma / delta;
     float r = std::ceil(3.0f * lambda * sigma);
 
-    if (std::floor(x - r) < minX || std::ceil(x + r) > maxX ||
-        std::floor(y - r) < minY || std::ceil(y + r) > maxY) {
+    if (std::floor(x - r) < minX || std::ceil(x + r) > maxX || std::floor(y - r) < minY ||
+        std::ceil(y + r) > maxY) {
+      continue;
+    }
+
+    if (validCount >= kMaxKeypoints) {
+      ++droppedByCapacity;
       continue;
     }
 
@@ -1035,11 +1346,18 @@ void SiftMetalExtractorImpl::ComputeOrientations(
     orientIn[validCount].absoluteY = static_cast<int32_t>(kp.y);
     orientIn[validCount].scale = static_cast<int32_t>(scaleIdx);
     orientIn[validCount].sigma = kp.sigma;
-    validIndices.push_back(k);
     ++validCount;
   }
 
-  if (validCount == 0) return;
+  if (droppedByCapacity > 0) {
+    RecordCapacityDrop("extract.orientation.octave_" + std::to_string(oct.o),
+                       "keypoints",
+                       droppedByCapacity,
+                       kMaxKeypoints,
+                       validCount + droppedByCapacity);
+  }
+
+  if (validCount == 0) return true;
 
   id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -1049,24 +1367,29 @@ void SiftMetalExtractorImpl::ComputeOrientations(
   [enc setBuffer:oct.orientationParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.gradientTextures atIndex:0];
 
-  NSUInteger maxThreads =
-      siftOrientationPipeline_.maxTotalThreadsPerThreadgroup;
+  NSUInteger maxThreads = siftOrientationPipeline_.maxTotalThreadsPerThreadgroup;
   MTLSize tg = {maxThreads, 1, 1};
   MTLSize gridSize = {(NSUInteger)validCount, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  if (!WaitForCommandBuffer(cb, "extract.orientation.octave_" + std::to_string(oct.o))) {
+    return false;
+  }
 
   // Read orientation results.
-  auto* orientOut = static_cast<SIFTOrientationResult*>(
-      oct.orientationOutputBuffer.contents);
+  auto* orientOut = static_cast<SIFTOrientationResult*>(oct.orientationOutputBuffer.contents);
+  int droppedOrientations = 0;
+  int observedOrientations = 0;
+  const int maxOrient = options_.upright ? 1 : std::max(0, options_.max_num_orientations);
   for (int k = 0; k < validCount; ++k) {
     auto& res = orientOut[k];
     int kpIdx = static_cast<int>(res.keypoint);
     int count = static_cast<int>(res.count);
-    int maxOrient = options_.upright ? 1 : options_.max_num_orientations;
+    observedOrientations += count;
+    if (count > maxOrient) {
+      droppedOrientations += count - maxOrient;
+    }
     count = std::min(count, maxOrient);
     float* oris = reinterpret_cast<float*>(&res.orientations);
     for (int i = 0; i < count; ++i) {
@@ -1074,27 +1397,43 @@ void SiftMetalExtractorImpl::ComputeOrientations(
       oriented.emplace_back(kpIdx, theta);
     }
   }
+  if (droppedOrientations > 0) {
+    last_status_.capacity.dropped_orientations += droppedOrientations;
+    std::ostringstream detail;
+    detail << "observed=" << observedOrientations << ", max_num_orientations=" << maxOrient
+           << ", dropped=" << droppedOrientations;
+    AddStatusMessage(StatusSeverity::kWarning,
+                     "extract.orientation.octave_" + std::to_string(oct.o),
+                     "Dropped orientations due to max_num_orientations limit",
+                     detail.str());
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // ComputeDescriptors
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::ComputeDescriptors(
-    Octave& oct, const std::vector<Keypoint>& keypoints,
-    const std::vector<std::pair<int, float>>& oriented,
-    ExtractResult* result) {
+bool SiftMetalExtractorImpl::ComputeDescriptors(Octave& oct,
+                                                const std::vector<Keypoint>& keypoints,
+                                                const std::vector<std::pair<int, float>>& oriented,
+                                                ExtractResult* result) {
   int count = std::min((int)oriented.size(), kMaxDescriptors);
-  if (count == 0) return;
+  if ((int)oriented.size() > kMaxDescriptors) {
+    RecordCapacityDrop("extract.descriptor.octave_" + std::to_string(oct.o),
+                       "descriptors",
+                       static_cast<int64_t>(oriented.size()) - kMaxDescriptors,
+                       kMaxDescriptors,
+                       static_cast<int64_t>(oriented.size()));
+  }
+  if (count == 0) return true;
 
-  auto* params =
-      static_cast<SIFTDescriptorParameters*>(oct.descriptorParamsBuffer.contents);
+  auto* params = static_cast<SIFTDescriptorParameters*>(oct.descriptorParamsBuffer.contents);
   params->delta = oct.delta;
   params->scalesPerOctave = static_cast<int32_t>(oct.num_scales);
   params->width = static_cast<int32_t>(oct.width);
   params->height = static_cast<int32_t>(oct.height);
 
-  auto* descIn =
-      static_cast<SIFTDescriptorInput*>(oct.descriptorInputBuffer.contents);
+  auto* descIn = static_cast<SIFTDescriptorInput*>(oct.descriptorInputBuffer.contents);
   for (int i = 0; i < count; ++i) {
     int kpIdx = oriented[i].first;
     float theta = oriented[i].second;
@@ -1112,8 +1451,7 @@ void SiftMetalExtractorImpl::ComputeDescriptors(
     }
     // Compute subScale.
     float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
-    float subScale = std::log(kp.sigma / oct.sigmas[scaleIdx]) /
-                     std::log(sigmaRatio);
+    float subScale = std::log(kp.sigma / oct.sigmas[scaleIdx]) / std::log(sigmaRatio);
 
     descIn[i].keypoint = static_cast<int32_t>(kpIdx);
     descIn[i].absoluteX = static_cast<int32_t>(kp.x);
@@ -1131,19 +1469,18 @@ void SiftMetalExtractorImpl::ComputeDescriptors(
   [enc setBuffer:oct.descriptorParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.gradientTextures atIndex:0];
 
-  NSUInteger maxThreads =
-      siftDescriptorsPipeline_.maxTotalThreadsPerThreadgroup;
+  NSUInteger maxThreads = siftDescriptorsPipeline_.maxTotalThreadsPerThreadgroup;
   MTLSize tg = {maxThreads, 1, 1};
   MTLSize gridSize = {(NSUInteger)count, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  if (!WaitForCommandBuffer(cb, "extract.descriptor.octave_" + std::to_string(oct.o))) {
+    return false;
+  }
 
   // Read descriptors.
-  auto* descOut = static_cast<SIFTDescriptorResult*>(
-      oct.descriptorOutputBuffer.contents);
+  auto* descOut = static_cast<SIFTDescriptorResult*>(oct.descriptorOutputBuffer.contents);
   for (int i = 0; i < count; ++i) {
     auto& dr = descOut[i];
     if (!dr.valid) continue;
@@ -1163,14 +1500,14 @@ void SiftMetalExtractorImpl::ComputeDescriptors(
       result->descriptors.push_back(dr.features[j]);
     }
   }
+  return true;
 }
 
 // ===========================================================================
 // Public API
 // ===========================================================================
 
-SiftMetalExtractor::SiftMetalExtractor()
-    : impl_(std::make_unique<SiftMetalExtractorImpl>()) {}
+SiftMetalExtractor::SiftMetalExtractor() : impl_(std::make_unique<SiftMetalExtractorImpl>()) {}
 
 SiftMetalExtractor::~SiftMetalExtractor() = default;
 
@@ -1178,9 +1515,10 @@ bool SiftMetalExtractor::Init(const Options& options, int max_w, int max_h) {
   return impl_->Init(options, max_w, max_h);
 }
 
-bool SiftMetalExtractor::Extract(const uint8_t* data, int w, int h,
-                                  ExtractResult* result) {
+bool SiftMetalExtractor::Extract(const uint8_t* data, int w, int h, ExtractResult* result) {
   return impl_->Extract(data, w, h, result);
 }
+
+const StatusReport& SiftMetalExtractor::LastStatus() const { return impl_->LastStatus(); }
 
 }  // namespace sift_metal

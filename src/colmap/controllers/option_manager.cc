@@ -267,6 +267,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                    &feature_extraction->sift->max_num_orientations);
   AddDefaultOption("SiftExtraction.upright",
                    &feature_extraction->sift->upright);
+  AddDefaultOption("SiftExtraction.darkness_adaptivity",
+                   &feature_extraction->sift->darkness_adaptivity);
   AddDefaultOption("SiftExtraction.use_metal",
                    &feature_extraction->sift->use_metal);
   AddDefaultOption("SiftExtraction.domain_size_pooling",
@@ -277,6 +279,8 @@ void OptionManager::AddFeatureExtractionOptions() {
                    &feature_extraction->sift->dsp_max_scale);
   AddDefaultOption("SiftExtraction.dsp_num_scales",
                    &feature_extraction->sift->dsp_num_scales);
+  AddDefaultOption("SiftExtraction.force_covariant_extractor",
+                   &feature_extraction->sift->force_covariant_extractor);
 
   AddDefaultOption("AlikedExtraction.max_num_features",
                    &feature_extraction->aliked->max_num_features);
