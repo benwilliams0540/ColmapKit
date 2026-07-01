@@ -15,6 +15,7 @@ compile_commands.json
 .cache
 build*/
 install*/
+dist/
 data/
 benchmark/reconstruction/data/
 benchmark/reconstruction/runs/
