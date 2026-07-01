@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ROOT="${COLMAPKIT_BUILD_ROOT:-"$ROOT_DIR/build-colmapkit-package"}"
 DIST_ROOT="${COLMAPKIT_DIST_ROOT:-"$ROOT_DIR/dist/colmapkit"}"
 MACOS_BUILD_DIR="$BUILD_ROOT/macos-arm64"
-MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-13.0}"
+MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-15.0}"
 METAL_ENABLED="${METAL_ENABLED:-ON}"
 SIFT_METAL_ENABLED="${SIFT_METAL_ENABLED:-OFF}"
 OPENMP_ENABLED="${OPENMP_ENABLED:-ON}"
@@ -13,6 +13,7 @@ GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 CMAKE_C_COMPILER="${CMAKE_C_COMPILER:-/usr/bin/cc}"
 CMAKE_CXX_COMPILER="${CMAKE_CXX_COMPILER:-/usr/bin/c++}"
 COLMAPKIT_CLEAN="${COLMAPKIT_CLEAN:-ON}"
+COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH="${COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH:-OFF}"
 LIBOMP_ROOT="${LIBOMP_ROOT:-}"
 
 if [[ -z "$LIBOMP_ROOT" ]] && command -v brew >/dev/null 2>&1; then
@@ -94,6 +95,7 @@ XCFRAMEWORK_PATH="$DIST_ROOT/ColmapKit.xcframework"
 AUDIT_PATH="$DIST_ROOT/ColmapKit-otool-L.txt"
 SIGNATURE_AUDIT_PATH="$DIST_ROOT/ColmapKit-codesign.txt"
 DEPLOYMENT_AUDIT_PATH="$DIST_ROOT/ColmapKit-deployment-targets.txt"
+DEPLOYMENT_MISMATCH_PATH="$DIST_ROOT/ColmapKit-deployment-mismatches.txt"
 
 if [[ ! -f "$FRAMEWORK_BINARY" ]]; then
   echo "error: Could not find ColmapKit framework binary at $FRAMEWORK_BINARY" >&2
@@ -215,6 +217,32 @@ codesign --verify --deep --strict --verbose=2 "$XCFRAMEWORK_PATH" > "$SIGNATURE_
   done | sort
 } > "$DEPLOYMENT_AUDIT_PATH"
 
+awk -v target="$MACOS_DEPLOYMENT_TARGET" '
+function split_version(version, parts) {
+  count = split(version, parts, ".")
+  for (part_index = count + 1; part_index <= 3; part_index++) {
+    parts[part_index] = 0
+  }
+}
+function version_greater_than(lhs, rhs, lhs_parts, rhs_parts, part_index) {
+  split_version(lhs, lhs_parts)
+  split_version(rhs, rhs_parts)
+  for (part_index = 1; part_index <= 3; part_index++) {
+    if (lhs_parts[part_index] + 0 > rhs_parts[part_index] + 0) {
+      return 1
+    }
+    if (lhs_parts[part_index] + 0 < rhs_parts[part_index] + 0) {
+      return 0
+    }
+  }
+  return 0
+}
+$1 ~ /^[0-9]+(\.[0-9]+)*$/ && $2 ~ /\.dylib$/ && version_greater_than($1, target) {
+  print
+}
+' "$DEPLOYMENT_AUDIT_PATH" > "$DEPLOYMENT_MISMATCH_PATH"
+deployment_mismatch_count="$(wc -l < "$DEPLOYMENT_MISMATCH_PATH" | tr -d ' ')"
+
 cat > "$DIST_ROOT/README.md" <<README
 # ColmapKit.xcframework
 
@@ -248,6 +276,12 @@ Deployment target audit:
 $DEPLOYMENT_AUDIT_PATH
 \`\`\`
 
+Deployment mismatches:
+
+\`\`\`text
+$DEPLOYMENT_MISMATCH_PATH
+\`\`\`
+
 Review \`ColmapKit-otool-L.txt\` before shipping. Non-system dylibs are vendored
 inside \`ColmapKit.framework/Versions/A/Frameworks\` and rewritten to
 \`@loader_path\`. Review \`ColmapKit-deployment-targets.txt\` before shipping;
@@ -259,3 +293,14 @@ echo "Created $XCFRAMEWORK_PATH"
 echo "Wrote dependency audit to $AUDIT_PATH"
 echo "Wrote signature audit to $SIGNATURE_AUDIT_PATH"
 echo "Wrote deployment target audit to $DEPLOYMENT_AUDIT_PATH"
+echo "Wrote deployment mismatch audit to $DEPLOYMENT_MISMATCH_PATH"
+
+if [[ "$deployment_mismatch_count" != "0" ]]; then
+  if [[ "$COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH" == "ON" ]]; then
+    echo "warning: $deployment_mismatch_count vendored dylibs require a newer macOS version than $MACOS_DEPLOYMENT_TARGET" >&2
+  else
+    echo "error: $deployment_mismatch_count vendored dylibs require a newer macOS version than $MACOS_DEPLOYMENT_TARGET" >&2
+    echo "Set COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH=ON only for local proof artifacts that will not be vendored into Splats." >&2
+    exit 1
+  fi
+fi

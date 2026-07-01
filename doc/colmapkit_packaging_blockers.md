@@ -14,6 +14,7 @@ dist/colmapkit/ColmapKit.xcframework
 dist/colmapkit/ColmapKit-otool-L.txt
 dist/colmapkit/ColmapKit-codesign.txt
 dist/colmapkit/ColmapKit-deployment-targets.txt
+dist/colmapkit/ColmapKit-deployment-mismatches.txt
 ```
 
 iOS probe summary:
@@ -30,10 +31,10 @@ For the runtime split and fallback policy, see [ColmapKit Metal Runtime Decision
 
 | Category | Status | Evidence | Next Action |
 | --- | --- | --- | --- |
-| macOS framework shape | Proven locally | `bash scripts/build_colmapkit_xcframework.sh` creates a macOS arm64 `ColmapKit.xcframework`. | Keep hardening the package script; Splats integration remains gated on the deployment-target blocker below. |
+| macOS framework shape | Proven locally; default package gate fails | The package script creates a macOS arm64 `ColmapKit.xcframework`, signs it, and writes audits, but exits nonzero by default while deployment mismatches remain. Use `COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH=ON` only for local proof artifacts that will not be vendored into Splats. | Keep hardening the package script; Splats integration remains gated on the deployment-target blocker below. |
 | Swift import | Proven locally | Swift can import `ColmapKit` and call `ColmapKitVersion` with `-F dist/colmapkit/ColmapKit.xcframework/macos-arm64`. | Add a small Splats-side wrapper target when editing Splats. |
 | Runtime dependency closure | Path closure proven; shipping still blocked | `dist/colmapkit/ColmapKit-otool-L.txt` rewrites direct non-system links to `@loader_path/Frameworks/...`; a recursive `otool -L` scan over `ColmapKit` and the 71 vendored dylibs shows no `/opt/homebrew` or `/usr/local` paths. | Do not vendor into Splats yet; resolve the deployment-target mismatch first or replace this wide dylib bundle with a slimmer/static dependency set. |
-| Deployment target | Blocked | `dist/colmapkit/ColmapKit-deployment-targets.txt` shows `ColmapKit` at minOS 13.0, but 63 vendored dylibs at minOS 26.0. The linker also warns about macOS 26.0 Homebrew dylibs while targeting macOS 13.0. | Rebuild dependencies for the target deployment version, slim to a smaller reconstruction dependency closure, or intentionally raise Splats' ColmapKit support floor before vendoring. |
+| Deployment target | Blocked | The package script now defaults to `MACOS_DEPLOYMENT_TARGET=15.0` to match Splats. `dist/colmapkit/ColmapKit-deployment-targets.txt` shows `ColmapKit` at minOS 15.0, but `dist/colmapkit/ColmapKit-deployment-mismatches.txt` records 63 vendored dylibs at minOS 26.0. The linker also warns about macOS 26.0 Homebrew dylibs while targeting macOS 15.0. | Rebuild dependencies for the target deployment version, slim to a smaller reconstruction dependency closure, or intentionally raise Splats' ColmapKit support floor before vendoring. |
 | Signing | Proven locally; not sufficient for shipping | `dist/colmapkit/ColmapKit-codesign.txt` records `codesign --verify --deep --strict --verbose=2 dist/colmapkit/ColmapKit.xcframework` as valid and satisfying its designated requirement. | Keep signing in the package script, but do not treat a signed artifact with minOS 26.0 vendored dylibs as shippable for the current macOS target. |
 | OpenMP disabled build | Blocked | COLMAP skips direct OpenMP lookup with `OPENMP_ENABLED=OFF`, but Homebrew `CHOLMODConfig.cmake` still calls `find_dependency(OpenMP COMPONENTS C)`. | Use an OpenMP-capable dependency set or build SuiteSparse/CHOLMOD without OpenMP for the package. |
 | iOS device slice | Blocked at configure | `bash scripts/probe_colmapkit_ios.sh` fails in strict mode at Boost discovery for `iphoneos`. | Provide an iOS-compatible dependency prefix/toolchain, then rerun the probe. |
@@ -54,4 +55,5 @@ not a shippable dependency closure for Splats unless the dylibs are deliberately
 bundled, signed, versioned with the app, and built for the same deployment
 target policy as Splats. The current bundled-dylib package is self-contained
 and signed, but remains blocked because most vendored dylibs require macOS
-26.0.
+26.0. The package script enforces that policy by failing by default when any
+vendored dylib requires a newer macOS version than `MACOS_DEPLOYMENT_TARGET`.
