@@ -1,6 +1,6 @@
 # ColmapKit Packaging Blockers
 
-Date: 2026-06-30
+Date: 2026-07-01
 
 This matrix tracks blockers found while shaping COLMAP into an Apple-facing
 `ColmapKit.xcframework` for Splats.
@@ -11,6 +11,9 @@ macOS proof package:
 
 ```text
 dist/colmapkit/ColmapKit.xcframework
+dist/colmapkit/ColmapKit-otool-L.txt
+dist/colmapkit/ColmapKit-codesign.txt
+dist/colmapkit/ColmapKit-deployment-targets.txt
 ```
 
 iOS probe summary:
@@ -27,11 +30,11 @@ For the runtime split and fallback policy, see [ColmapKit Metal Runtime Decision
 
 | Category | Status | Evidence | Next Action |
 | --- | --- | --- | --- |
-| macOS framework shape | Proven locally | `bash scripts/build_colmapkit_xcframework.sh` creates a macOS arm64 `ColmapKit.xcframework`. | Keep hardening the package script while Splats integration starts against macOS. |
+| macOS framework shape | Proven locally | `bash scripts/build_colmapkit_xcframework.sh` creates a macOS arm64 `ColmapKit.xcframework`. | Keep hardening the package script; Splats integration remains gated on the deployment-target blocker below. |
 | Swift import | Proven locally | Swift can import `ColmapKit` and call `ColmapKitVersion` with `-F dist/colmapkit/ColmapKit.xcframework/macos-arm64`. | Add a small Splats-side wrapper target when editing Splats. |
-| Runtime dependency closure | Blocked | `dist/colmapkit/ColmapKit-otool-L.txt` shows Homebrew dylibs for Boost, Ceres, OpenImageIO, glog, gflags, Metis, libomp, and SuiteSparse/CHOLMOD. | Choose static/vendored dependency builds or a deliberate bundled-dylib/signing strategy. |
-| Deployment target | Blocked | macOS package link warns that Homebrew dylibs were built for macOS 26.0 while the package targets macOS 13.0. | Rebuild dependencies for the target deployment version or raise the package deployment target intentionally. |
-| Signing | Not started | `codesign --verify --deep --strict --verbose=2 dist/colmapkit/ColmapKit.xcframework` reports `code object is not signed at all`. | Sign only after dependency closure is deliberate; do not sign a misleading host-dylib package. |
+| Runtime dependency closure | Path closure proven; shipping still blocked | `dist/colmapkit/ColmapKit-otool-L.txt` rewrites direct non-system links to `@loader_path/Frameworks/...`; a recursive `otool -L` scan over `ColmapKit` and the 71 vendored dylibs shows no `/opt/homebrew` or `/usr/local` paths. | Do not vendor into Splats yet; resolve the deployment-target mismatch first or replace this wide dylib bundle with a slimmer/static dependency set. |
+| Deployment target | Blocked | `dist/colmapkit/ColmapKit-deployment-targets.txt` shows `ColmapKit` at minOS 13.0, but 63 vendored dylibs at minOS 26.0. The linker also warns about macOS 26.0 Homebrew dylibs while targeting macOS 13.0. | Rebuild dependencies for the target deployment version, slim to a smaller reconstruction dependency closure, or intentionally raise Splats' ColmapKit support floor before vendoring. |
+| Signing | Proven locally; not sufficient for shipping | `dist/colmapkit/ColmapKit-codesign.txt` records `codesign --verify --deep --strict --verbose=2 dist/colmapkit/ColmapKit.xcframework` as valid and satisfying its designated requirement. | Keep signing in the package script, but do not treat a signed artifact with minOS 26.0 vendored dylibs as shippable for the current macOS target. |
 | OpenMP disabled build | Blocked | COLMAP skips direct OpenMP lookup with `OPENMP_ENABLED=OFF`, but Homebrew `CHOLMODConfig.cmake` still calls `find_dependency(OpenMP COMPONENTS C)`. | Use an OpenMP-capable dependency set or build SuiteSparse/CHOLMOD without OpenMP for the package. |
 | iOS device slice | Blocked at configure | `bash scripts/probe_colmapkit_ios.sh` fails in strict mode at Boost discovery for `iphoneos`. | Provide an iOS-compatible dependency prefix/toolchain, then rerun the probe. |
 | iOS simulator slice | Blocked at configure | `bash scripts/probe_colmapkit_ios.sh` fails in strict mode at Boost discovery for `iphonesimulator`. | Provide an iOS simulator-compatible dependency prefix/toolchain, then rerun the probe. |
@@ -48,4 +51,7 @@ iOS-compatible dependency prefix or toolchain.
 
 For macOS, Homebrew is acceptable as proof-of-concept build input, but it is
 not a shippable dependency closure for Splats unless the dylibs are deliberately
-bundled, signed, and versioned with the app.
+bundled, signed, versioned with the app, and built for the same deployment
+target policy as Splats. The current bundled-dylib package is self-contained
+and signed, but remains blocked because most vendored dylibs require macOS
+26.0.
