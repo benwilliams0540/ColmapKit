@@ -13,7 +13,11 @@ else()
     message(STATUS "Disabling LSD support")
 endif()
 
-find_package(OpenMP REQUIRED COMPONENTS C CXX)
+if(OPENMP_ENABLED)
+    find_package(OpenMP REQUIRED COMPONENTS C CXX)
+else()
+    set(OpenMP_FOUND FALSE)
+endif()
 
 find_package(Boost ${COLMAP_FIND_TYPE} COMPONENTS
              graph

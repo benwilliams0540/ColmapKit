@@ -62,6 +62,7 @@ option(FETCH_FAISS "Whether to consume faiss using FetchContent or find_package"
 option(FETCH_ONNX "Whether to consume ONNX using FetchContent or find_package" ON)
 option(BUILD_SHARED_LIBS "Whether to build shared libraries (faster linktime, slower runtime)" OFF)
 option(ALL_SOURCE_TARGET "Whether to create a target for all source files (for Visual Studio / XCode development)" OFF)
+option(COLMAPKIT_FRAMEWORK_ENABLED "Whether to build the Apple ColmapKit.framework target" OFF)
 
 # Experimental
 option(CASPAR_ENABLED "Whether to enable CASPAR-accelerated bundle adjustment" OFF)
@@ -313,6 +314,7 @@ endif()
 ################################################################################
 
 COLMAP_ADD_SOURCE_DIR(src/colmap/controllers CONTROLLERS_SRCS *.h *.cc)
+COLMAP_ADD_SOURCE_DIR(src/colmap/colmapkit COLMAPKIT_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators ESTIMATORS_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators/cost_functions ESTIMATORS_COST_FUNCTIONS_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators/solvers ESTIMATORS_SOLVERS_SRCS *.h *.cc)
@@ -346,6 +348,7 @@ COLMAP_ADD_SOURCE_DIR(src/thirdparty/VLFeat THIRDPARTY_VLFEAT_SRCS *.h *.c *.tc)
 if(ALL_SOURCE_TARGET)
     set(ALL_SRCS
         ${CONTROLLERS_SRCS}
+        ${COLMAPKIT_SRCS}
         ${ESTIMATORS_SRCS}
         ${ESTIMATORS_COST_FUNCTIONS_SRCS}
         ${ESTIMATORS_SOLVERS_SRCS}
@@ -420,6 +423,7 @@ endif()
 set(COLMAP_EXPORT_LIBS
     # Internal.
     colmap_controllers
+    colmap_colmapkit
     colmap_estimators
     colmap_estimators_cost_functions
     colmap_estimators_solvers
