@@ -51,7 +51,8 @@ typedef enum ColmapKitStatus {
   COLMAPKIT_STATUS_OK = 0,
   COLMAPKIT_STATUS_INVALID_ARGUMENT = 1,
   COLMAPKIT_STATUS_UNSUPPORTED = 2,
-  COLMAPKIT_STATUS_RUNTIME_ERROR = 3
+  COLMAPKIT_STATUS_RUNTIME_ERROR = 3,
+  COLMAPKIT_STATUS_CANCELLED = 4
 } ColmapKitStatus;
 
 typedef enum ColmapKitMatcherKind {
@@ -67,7 +68,8 @@ typedef enum ColmapKitProgressStage {
   COLMAPKIT_PROGRESS_STAGE_MAPPING = 3,
   COLMAPKIT_PROGRESS_STAGE_SPARSE_TEXT_EXPORT = 4,
   COLMAPKIT_PROGRESS_STAGE_FINISHED = 5,
-  COLMAPKIT_PROGRESS_STAGE_FAILED = 6
+  COLMAPKIT_PROGRESS_STAGE_FAILED = 6,
+  COLMAPKIT_PROGRESS_STAGE_CANCELLED = 7
 } ColmapKitProgressStage;
 
 typedef struct ColmapKitProgressEvent {
@@ -122,6 +124,9 @@ typedef struct ColmapKitSparseReconstructionResult {
   char message[COLMAPKIT_MESSAGE_CAPACITY];
 } ColmapKitSparseReconstructionResult;
 
+typedef struct ColmapKitSparseReconstructionJob
+    ColmapKitSparseReconstructionJob;
+
 COLMAPKIT_EXPORT const char* ColmapKitVersion(void);
 
 COLMAPKIT_EXPORT ColmapKitStatus
@@ -130,6 +135,20 @@ ColmapKitInitialize(const char* application_name);
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitRunSparseReconstruction(
     const ColmapKitSparseReconstructionConfig* config,
     ColmapKitSparseReconstructionResult* result);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartSparseReconstruction(
+    const ColmapKitSparseReconstructionConfig* config,
+    ColmapKitSparseReconstructionJob** job);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelSparseReconstruction(
+    ColmapKitSparseReconstructionJob* job);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitSparseReconstruction(
+    ColmapKitSparseReconstructionJob* job,
+    ColmapKitSparseReconstructionResult* result);
+
+COLMAPKIT_EXPORT void ColmapKitReleaseSparseReconstructionJob(
+    ColmapKitSparseReconstructionJob* job);
 
 #ifdef __cplusplus
 }

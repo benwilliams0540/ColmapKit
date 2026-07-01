@@ -43,6 +43,7 @@
 #include "colmap/util/oiio_utils.h"
 #include "colmap/util/version.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -52,6 +53,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
 
 namespace {
 
@@ -83,6 +86,124 @@ bool ConfigHasField(const ColmapKitSparseReconstructionConfig& config,
                  offsetof(ColmapKitSparseReconstructionConfig, field) + \
                      sizeof(config.field))
 
+class ColmapKitCancelledError : public std::runtime_error {
+ public:
+  ColmapKitCancelledError()
+      : std::runtime_error("Sparse reconstruction cancelled.") {}
+};
+
+class ColmapKitCancellationContext {
+ public:
+  void RequestCancel() {
+    cancellation_requested_.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_thread_ != nullptr) {
+      active_thread_->Stop();
+    }
+  }
+
+  bool IsCancellationRequested() const {
+    return cancellation_requested_.load(std::memory_order_acquire);
+  }
+
+  void SetActiveThread(colmap::Thread* thread) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_thread_ = thread;
+    if (active_thread_ != nullptr && IsCancellationRequested()) {
+      active_thread_->Stop();
+    }
+  }
+
+  void ClearActiveThread(colmap::Thread* thread) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_thread_ == thread) {
+      active_thread_ = nullptr;
+    }
+  }
+
+ private:
+  std::atomic<bool> cancellation_requested_{false};
+  mutable std::mutex mutex_;
+  colmap::Thread* active_thread_ = nullptr;
+};
+
+class ScopedActiveThread {
+ public:
+  ScopedActiveThread(ColmapKitCancellationContext* cancellation,
+                     colmap::Thread* thread)
+      : cancellation_(cancellation), thread_(thread) {
+    if (cancellation_ != nullptr) {
+      cancellation_->SetActiveThread(thread_);
+    }
+  }
+
+  ~ScopedActiveThread() {
+    if (cancellation_ != nullptr) {
+      cancellation_->ClearActiveThread(thread_);
+    }
+  }
+
+ private:
+  ColmapKitCancellationContext* cancellation_;
+  colmap::Thread* thread_;
+};
+
+void ThrowIfCancelled(ColmapKitCancellationContext* cancellation) {
+  if (cancellation != nullptr && cancellation->IsCancellationRequested()) {
+    throw ColmapKitCancelledError();
+  }
+}
+
+struct OwnedSparseReconstructionConfig {
+  ColmapKitSparseReconstructionConfig config = {};
+
+  std::string database_path;
+  std::string image_path;
+  std::string output_path;
+  std::string sparse_text_output_path;
+  std::string image_list_path;
+  std::string camera_model;
+  std::string camera_params;
+
+  bool has_sparse_text_output_path = false;
+  bool has_image_list_path = false;
+  bool has_camera_model = false;
+  bool has_camera_params = false;
+
+  static OwnedSparseReconstructionConfig CopyFrom(
+      const ColmapKitSparseReconstructionConfig& source) {
+    OwnedSparseReconstructionConfig owned;
+    owned.config = source;
+    owned.database_path = CStringOrEmpty(source.database_path);
+    owned.image_path = CStringOrEmpty(source.image_path);
+    owned.output_path = CStringOrEmpty(source.output_path);
+    owned.sparse_text_output_path =
+        CStringOrEmpty(source.sparse_text_output_path);
+    owned.image_list_path = CStringOrEmpty(source.image_list_path);
+    owned.camera_model = CStringOrEmpty(source.camera_model);
+    owned.camera_params = CStringOrEmpty(source.camera_params);
+    owned.has_sparse_text_output_path =
+        source.sparse_text_output_path != nullptr;
+    owned.has_image_list_path = source.image_list_path != nullptr;
+    owned.has_camera_model = source.camera_model != nullptr;
+    owned.has_camera_params = source.camera_params != nullptr;
+    owned.RefreshPointers();
+    return owned;
+  }
+
+  void RefreshPointers() {
+    config.database_path = database_path.c_str();
+    config.image_path = image_path.c_str();
+    config.output_path = output_path.c_str();
+    config.sparse_text_output_path =
+        has_sparse_text_output_path ? sparse_text_output_path.c_str() : nullptr;
+    config.image_list_path =
+        has_image_list_path ? image_list_path.c_str() : nullptr;
+    config.camera_model = has_camera_model ? camera_model.c_str() : nullptr;
+    config.camera_params = has_camera_params ? camera_params.c_str() : nullptr;
+  }
+};
+
 void CopyMessage(const std::string& message,
                  ColmapKitSparseReconstructionResult* result) {
   if (result == nullptr) {
@@ -108,6 +229,12 @@ void SetFailure(ColmapKitStatus status,
   }
   result->status = status;
   CopyMessage(message, result);
+}
+
+void SetCancelled(ColmapKitSparseReconstructionResult* result) {
+  SetFailure(COLMAPKIT_STATUS_CANCELLED,
+             "Sparse reconstruction cancelled.",
+             result);
 }
 
 void EmitProgress(const ColmapKitSparseReconstructionConfig& config,
@@ -290,9 +417,16 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakeMapperOptions(
   return options;
 }
 
-void RunThread(colmap::Thread* thread) {
+void RunThread(colmap::Thread* thread,
+               ColmapKitCancellationContext* cancellation) {
+  ThrowIfCancelled(cancellation);
+  ScopedActiveThread active_thread(cancellation, thread);
   thread->Start();
+  if (cancellation != nullptr && cancellation->IsCancellationRequested()) {
+    thread->Stop();
+  }
   thread->Wait();
+  ThrowIfCancelled(cancellation);
 }
 
 void CreateParentDirIfNeeded(const std::filesystem::path& path) {
@@ -362,9 +496,11 @@ std::string SummaryMessage(const ColmapKitSparseReconstructionResult& result) {
 
 ColmapKitStatus RunSparseReconstructionImpl(
     const ColmapKitSparseReconstructionConfig& config,
-    ColmapKitSparseReconstructionResult* result) {
+    ColmapKitSparseReconstructionResult* result,
+    ColmapKitCancellationContext* cancellation) {
   colmap::EnsureOpenImageIOInitialized();
   ValidateConfig(config);
+  ThrowIfCancelled(cancellation);
 
   const auto database_path = PathFromCString(config.database_path);
   const auto output_path = PathFromCString(config.output_path);
@@ -382,6 +518,7 @@ ColmapKitStatus RunSparseReconstructionImpl(
   EmitProgress(config,
                COLMAPKIT_PROGRESS_STAGE_PREPARING,
                "Preparing COLMAP sparse reconstruction");
+  ThrowIfCancelled(cancellation);
 
   auto extraction_options = MakeExtractionOptions(config);
   auto reader_options = MakeReaderOptions(config, extraction_options);
@@ -391,13 +528,15 @@ ColmapKitStatus RunSparseReconstructionImpl(
                "Extracting SIFT features");
   auto feature_extractor = colmap::CreateFeatureExtractorController(
       database_path, reader_options, extraction_options);
-  RunThread(feature_extractor.get());
+  RunThread(feature_extractor.get(), cancellation);
+  ThrowIfCancelled(cancellation);
 
   auto matching_options = MakeMatchingOptions(config);
   EmitProgress(
       config, COLMAPKIT_PROGRESS_STAGE_MATCHING, "Matching image features");
   auto matcher = MakeMatcher(config, matching_options);
-  RunThread(matcher.get());
+  RunThread(matcher.get(), cancellation);
+  ThrowIfCancelled(cancellation);
 
   auto mapper_options = MakeMapperOptions(config);
   auto reconstruction_manager =
@@ -417,6 +556,13 @@ ColmapKitStatus RunSparseReconstructionImpl(
                  0);
   };
 
+  std::function<bool()> check_if_stopped;
+  if (cancellation != nullptr) {
+    check_if_stopped = [cancellation]() {
+      return cancellation->IsCancellationRequested();
+    };
+  }
+
   const bool mapper_ok =
       colmap::RunIncrementalMapperImpl(database_path,
                                        PathFromCString(config.image_path),
@@ -424,7 +570,9 @@ ColmapKitStatus RunSparseReconstructionImpl(
                                        mapper_options,
                                        reconstruction_manager,
                                        mapping_callback,
-                                       mapping_callback);
+                                       mapping_callback,
+                                       check_if_stopped);
+  ThrowIfCancelled(cancellation);
   if (!mapper_ok) {
     throw std::runtime_error(
         "Incremental mapper failed to create a sparse model.");
@@ -436,8 +584,10 @@ ColmapKitStatus RunSparseReconstructionImpl(
     EmitProgress(config,
                  COLMAPKIT_PROGRESS_STAGE_SPARSE_TEXT_EXPORT,
                  "Writing COLMAP sparse text output");
+    ThrowIfCancelled(cancellation);
     WriteSparseText(*reconstruction_manager, sparse_text_path);
   }
+  ThrowIfCancelled(cancellation);
 
   FillResultMetrics(*reconstruction_manager, result);
   result->status = COLMAPKIT_STATUS_OK;
@@ -450,7 +600,84 @@ ColmapKitStatus RunSparseReconstructionImpl(
   return COLMAPKIT_STATUS_OK;
 }
 
+ColmapKitStatus RunSparseReconstructionWithResult(
+    const ColmapKitSparseReconstructionConfig& config,
+    ColmapKitSparseReconstructionResult* result,
+    ColmapKitCancellationContext* cancellation) {
+  try {
+    return RunSparseReconstructionImpl(config, result, cancellation);
+  } catch (const ColmapKitCancelledError&) {
+    SetCancelled(result);
+    EmitProgress(config,
+                 COLMAPKIT_PROGRESS_STAGE_CANCELLED,
+                 "Sparse reconstruction cancelled",
+                 result == nullptr ? "" : result->message);
+  } catch (const std::invalid_argument& error) {
+    SetFailure(COLMAPKIT_STATUS_INVALID_ARGUMENT, error.what(), result);
+    EmitProgress(config,
+                 COLMAPKIT_PROGRESS_STAGE_FAILED,
+                 "Sparse reconstruction failed",
+                 result == nullptr ? "" : result->message);
+  } catch (const std::runtime_error& error) {
+    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR, error.what(), result);
+    EmitProgress(config,
+                 COLMAPKIT_PROGRESS_STAGE_FAILED,
+                 "Sparse reconstruction failed",
+                 result == nullptr ? "" : result->message);
+  } catch (const std::exception& error) {
+    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR, error.what(), result);
+    EmitProgress(config,
+                 COLMAPKIT_PROGRESS_STAGE_FAILED,
+                 "Sparse reconstruction failed",
+                 result == nullptr ? "" : result->message);
+  } catch (...) {
+    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR,
+               "Unknown ColmapKit sparse reconstruction failure.",
+               result);
+    EmitProgress(config,
+                 COLMAPKIT_PROGRESS_STAGE_FAILED,
+                 "Sparse reconstruction failed",
+                 result == nullptr ? "" : result->message);
+  }
+
+  return result == nullptr ? COLMAPKIT_STATUS_RUNTIME_ERROR : result->status;
+}
+
 }  // namespace
+
+struct ColmapKitSparseReconstructionJob {
+  explicit ColmapKitSparseReconstructionJob(
+      OwnedSparseReconstructionConfig owned_config)
+      : config(std::move(owned_config)) {
+    ResetResult(&result);
+  }
+
+  ~ColmapKitSparseReconstructionJob() {
+    RequestCancel();
+    Wait();
+  }
+
+  void Start() {
+    worker = std::thread([this]() {
+      ResetResult(&result);
+      config.RefreshPointers();
+      RunSparseReconstructionWithResult(config.config, &result, &cancellation);
+    });
+  }
+
+  void RequestCancel() { cancellation.RequestCancel(); }
+
+  void Wait() {
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+
+  OwnedSparseReconstructionConfig config;
+  ColmapKitCancellationContext cancellation;
+  ColmapKitSparseReconstructionResult result = {};
+  std::thread worker;
+};
 
 const char* ColmapKitVersion(void) {
   static const std::string version =
@@ -492,24 +719,64 @@ ColmapKitStatus ColmapKitRunSparseReconstruction(
     return result->status;
   }
 
-  try {
-    return RunSparseReconstructionImpl(*config, result);
-  } catch (const std::invalid_argument& error) {
-    SetFailure(COLMAPKIT_STATUS_INVALID_ARGUMENT, error.what(), result);
-  } catch (const std::runtime_error& error) {
-    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR, error.what(), result);
-  } catch (const std::exception& error) {
-    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR, error.what(), result);
-  } catch (...) {
-    SetFailure(COLMAPKIT_STATUS_RUNTIME_ERROR,
-               "Unknown ColmapKit sparse reconstruction failure.",
-               result);
+  return RunSparseReconstructionWithResult(*config, result, nullptr);
+}
+
+ColmapKitStatus ColmapKitStartSparseReconstruction(
+    const ColmapKitSparseReconstructionConfig* config,
+    ColmapKitSparseReconstructionJob** job) {
+  if (job == nullptr) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
+  }
+  *job = nullptr;
+  if (config == nullptr) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
+  }
+  if (config->struct_size != 0 && config->struct_size < kMinimumConfigSize) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
   }
 
-  ColmapKitSparseReconstructionConfig failure_config = *config;
-  EmitProgress(failure_config,
-               COLMAPKIT_PROGRESS_STAGE_FAILED,
-               "Sparse reconstruction failed",
-               result->message);
+  try {
+    auto owned_config = OwnedSparseReconstructionConfig::CopyFrom(*config);
+    auto new_job = std::make_unique<ColmapKitSparseReconstructionJob>(
+        std::move(owned_config));
+    new_job->Start();
+    *job = new_job.release();
+    return COLMAPKIT_STATUS_OK;
+  } catch (const std::invalid_argument&) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
+  } catch (...) {
+    return COLMAPKIT_STATUS_RUNTIME_ERROR;
+  }
+}
+
+ColmapKitStatus ColmapKitCancelSparseReconstruction(
+    ColmapKitSparseReconstructionJob* job) {
+  if (job == nullptr) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
+  }
+  job->RequestCancel();
+  return COLMAPKIT_STATUS_OK;
+}
+
+ColmapKitStatus ColmapKitWaitSparseReconstruction(
+    ColmapKitSparseReconstructionJob* job,
+    ColmapKitSparseReconstructionResult* result) {
+  ResetResult(result);
+  if (result == nullptr) {
+    return COLMAPKIT_STATUS_INVALID_ARGUMENT;
+  }
+  if (job == nullptr) {
+    SetFailure(COLMAPKIT_STATUS_INVALID_ARGUMENT, "job is required.", result);
+    return result->status;
+  }
+
+  job->Wait();
+  *result = job->result;
   return result->status;
+}
+
+void ColmapKitReleaseSparseReconstructionJob(
+    ColmapKitSparseReconstructionJob* job) {
+  delete job;
 }

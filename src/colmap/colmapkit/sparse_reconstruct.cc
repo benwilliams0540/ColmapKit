@@ -3,8 +3,11 @@
 
 #include "colmap/colmapkit/colmapkit.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -24,7 +27,8 @@ void PrintUsage(const char* argv0) {
       << " [--num_threads N]"
       << " [--mapper_random_seed N]"
       << " [--use_metal_matching 0|1]"
-      << " [--use_metal_sift 0|1]\n";
+      << " [--use_metal_sift 0|1]"
+      << " [--cancel_after_first_progress 0|1]\n";
 }
 
 std::unordered_map<std::string, std::string> ParseArgs(int argc, char** argv) {
@@ -79,9 +83,23 @@ ColmapKitMatcherKind MatcherKind(const std::string& matcher) {
   throw std::invalid_argument("Unsupported matcher: " + matcher);
 }
 
-void ProgressCallback(const ColmapKitProgressEvent* event, void*) {
+struct ProgressState {
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool saw_progress = false;
+};
+
+void ProgressCallback(const ColmapKitProgressEvent* event, void* user_data) {
   if (event == nullptr) {
     return;
+  }
+  if (user_data != nullptr) {
+    auto* state = static_cast<ProgressState*>(user_data);
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->saw_progress = true;
+    }
+    state->condition.notify_all();
   }
   std::cout << "[ColmapKit] "
             << (event->message == nullptr ? "" : event->message);
@@ -141,12 +159,36 @@ int main(int argc, char** argv) {
         OptionalInt(args, "mapper_min_model_size", -1);
     config.mapper_random_seed = OptionalInt(args, "mapper_random_seed", 0);
     config.write_sparse_text = OptionalInt(args, "write_sparse_text", 1);
+    ProgressState progress_state;
     config.progress_callback = ProgressCallback;
+    config.progress_user_data = &progress_state;
 
     ColmapKitSparseReconstructionResult result = {};
     result.struct_size = sizeof(result);
-    const ColmapKitStatus status =
-        ColmapKitRunSparseReconstruction(&config, &result);
+    ColmapKitSparseReconstructionJob* job = nullptr;
+    ColmapKitStatus status = ColmapKitStartSparseReconstruction(&config, &job);
+    if (status != COLMAPKIT_STATUS_OK) {
+      std::cerr << "Failed to start ColmapKit job: " << status << '\n';
+      return EXIT_FAILURE;
+    }
+
+    const bool cancel_after_first_progress =
+        OptionalInt(args, "cancel_after_first_progress", 0) != 0;
+    if (cancel_after_first_progress) {
+      std::unique_lock<std::mutex> lock(progress_state.mutex);
+      progress_state.condition.wait_for(lock, std::chrono::seconds(30), [&]() {
+        return progress_state.saw_progress;
+      });
+      ColmapKitCancelSparseReconstruction(job);
+    }
+
+    status = ColmapKitWaitSparseReconstruction(job, &result);
+    ColmapKitReleaseSparseReconstructionJob(job);
+    if (cancel_after_first_progress &&
+        status == COLMAPKIT_STATUS_CANCELLED) {
+      std::cout << result.message << '\n';
+      return EXIT_SUCCESS;
+    }
     if (status != COLMAPKIT_STATUS_OK) {
       std::cerr << result.message << '\n';
       return EXIT_FAILURE;
