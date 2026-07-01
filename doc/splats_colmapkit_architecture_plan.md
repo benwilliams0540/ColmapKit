@@ -506,6 +506,50 @@ Known remaining blockers:
 - The fixture is synthetic. A real Splats-like photo/video-frame capture still needs to be run through CLI COLMAP and ColmapKit.
 - Metal matching and SiftMetal extraction are not covered by this CPU fixture comparison.
 
+### 2026-07-01: macOS Package Dependency Closure
+
+Implemented:
+
+- Added `cmake/vcpkg-triplets/arm64-osx-release-macos15.cmake` for static release dependencies built with macOS deployment target 15.0.
+- Added `scripts/build_libomp_macos.sh` to build LLVM OpenMP from source with `MACOS_DEPLOYMENT_TARGET=15.0`.
+- Extended `scripts/build_colmapkit_xcframework.sh` to accept vcpkg toolchain/triplet inputs and to vendor an explicit `LIBOMP_ROOT` even when its install name is `@rpath/libomp.dylib`.
+- Generated a signed macOS arm64 `dist/colmapkit/ColmapKit.xcframework` with bundled `Frameworks/libomp.dylib`.
+
+Validated:
+
+- `COLMAPKIT_CMAKE_MAKE_PROGRAM=/private/tmp/colmap-vcpkg/downloads/tools/ninja-1.13.2-osx/ninja scripts/build_libomp_macos.sh`
+- `COLMAPKIT_CMAKE_TOOLCHAIN_FILE=/private/tmp/colmap-vcpkg/scripts/buildsystems/vcpkg.cmake COLMAPKIT_VCPKG_TARGET_TRIPLET=arm64-osx-release-macos15 COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-macos15 COLMAPKIT_CMAKE_MAKE_PROGRAM=/private/tmp/colmap-vcpkg/downloads/tools/ninja-1.13.2-osx/ninja COLMAPKIT_IGNORE_PREFIXES='/opt/homebrew;/usr/local' LIBOMP_ROOT=$PWD/dist/libomp-macos15.0 scripts/build_colmapkit_xcframework.sh`
+- `xcrun swift -module-cache-path .build/swift-module-cache -F dist/colmapkit/ColmapKit.xcframework/macos-arm64 -framework ColmapKit -e 'import ColmapKit; print(String(cString: ColmapKitVersion()))'`
+- `cmake --build build-colmapkit-package/macos-arm64 --target colmap colmapkit_sparse_reconstruct`
+- `DYLD_LIBRARY_PATH=$PWD/dist/libomp-macos15.0/lib python3 scripts/python/colmapkit_compare.py --colmap-bin build-colmapkit-package/macos-arm64/src/colmap/exe/colmap --colmapkit-bin build-colmapkit-package/macos-arm64/src/colmap/colmapkit/colmapkit_sparse_reconstruct --run-dir /private/tmp/colmapkit-compare-vcpkg-libomp-run --generate-synthetic-fixture --force`
+
+Package evidence:
+
+- `dist/colmapkit/ColmapKit-otool-L.txt` shows `@loader_path/Frameworks/libomp.dylib` as the only non-system runtime dependency.
+- `dist/colmapkit/ColmapKit-deployment-targets.txt` records `ColmapKit` and vendored `libomp.dylib` at minOS 15.0.
+- `dist/colmapkit/ColmapKit-deployment-mismatches.txt` has 0 lines.
+- `dist/colmapkit/ColmapKit-codesign.txt` reports the xcframework is valid on disk and satisfies its designated requirement.
+
+Comparison result:
+
+- database exists for both paths
+- images: 8
+- keypoints/descriptors: 54130
+- verified pairs: 17
+- verified inliers: 3569
+- sparse models: 1
+- registered images: 8
+- sparse points: 603
+- observations: 2392
+- mean reprojection error: 0.5178138327118803
+- runtime warnings: none
+
+Known remaining blockers:
+
+- Splats-side vendoring, Tuist wiring, native reconstruct adapter, and parity check are not done in this COLMAP commit.
+- iOS device/simulator slices remain blocked by unavailable iOS-compatible third-party dependencies.
+- Metal matching and SiftMetal extraction remain outside the default packaged path.
+
 ### 2026-06-30: iOS Slice Feasibility Probe
 
 Implemented:

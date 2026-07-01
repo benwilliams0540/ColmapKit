@@ -14,7 +14,17 @@ CMAKE_C_COMPILER="${CMAKE_C_COMPILER:-/usr/bin/cc}"
 CMAKE_CXX_COMPILER="${CMAKE_CXX_COMPILER:-/usr/bin/c++}"
 COLMAPKIT_CLEAN="${COLMAPKIT_CLEAN:-ON}"
 COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH="${COLMAPKIT_ALLOW_DEPLOYMENT_MISMATCH:-OFF}"
+COLMAPKIT_CMAKE_TOOLCHAIN_FILE="${COLMAPKIT_CMAKE_TOOLCHAIN_FILE:-${CMAKE_TOOLCHAIN_FILE:-}}"
+COLMAPKIT_CMAKE_MAKE_PROGRAM="${COLMAPKIT_CMAKE_MAKE_PROGRAM:-${CMAKE_MAKE_PROGRAM:-}}"
+COLMAPKIT_VCPKG_TARGET_TRIPLET="${COLMAPKIT_VCPKG_TARGET_TRIPLET:-${VCPKG_TARGET_TRIPLET:-}}"
+COLMAPKIT_VCPKG_INSTALLED_DIR="${COLMAPKIT_VCPKG_INSTALLED_DIR:-${VCPKG_INSTALLED_DIR:-}}"
+COLMAPKIT_VCPKG_OVERLAY_TRIPLETS="${COLMAPKIT_VCPKG_OVERLAY_TRIPLETS:-${VCPKG_OVERLAY_TRIPLETS:-}}"
+COLMAPKIT_IGNORE_PREFIXES="${COLMAPKIT_IGNORE_PREFIXES:-}"
 LIBOMP_ROOT="${LIBOMP_ROOT:-}"
+
+if [[ -n "$COLMAPKIT_VCPKG_TARGET_TRIPLET" && -z "$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS" && -d "$ROOT_DIR/cmake/vcpkg-triplets" ]]; then
+  COLMAPKIT_VCPKG_OVERLAY_TRIPLETS="$ROOT_DIR/cmake/vcpkg-triplets"
+fi
 
 if [[ -z "$LIBOMP_ROOT" ]] && command -v brew >/dev/null 2>&1; then
   LIBOMP_ROOT="$(brew --prefix libomp 2>/dev/null || true)"
@@ -23,21 +33,28 @@ if [[ -z "$LIBOMP_ROOT" && -d /opt/homebrew/opt/libomp ]]; then
   LIBOMP_ROOT="/opt/homebrew/opt/libomp"
 fi
 
+prepend_cmake_path() {
+  local entry="$1"
+  local current="$2"
+  if [[ -z "$entry" ]]; then
+    printf '%s' "$current"
+  elif [[ -n "$current" ]]; then
+    printf '%s;%s' "$entry" "$current"
+  else
+    printf '%s' "$entry"
+  fi
+}
+
 CMAKE_PREFIX_PATH_VALUE="${CMAKE_PREFIX_PATH:-}"
 CMAKE_IGNORE_PREFIX_PATH_VALUE="${CMAKE_IGNORE_PREFIX_PATH:-}"
 if [[ -n "$LIBOMP_ROOT" ]]; then
-  if [[ -n "$CMAKE_PREFIX_PATH_VALUE" ]]; then
-    CMAKE_PREFIX_PATH_VALUE="$LIBOMP_ROOT;$CMAKE_PREFIX_PATH_VALUE"
-  else
-    CMAKE_PREFIX_PATH_VALUE="$LIBOMP_ROOT"
-  fi
+  CMAKE_PREFIX_PATH_VALUE="$(prepend_cmake_path "$LIBOMP_ROOT" "$CMAKE_PREFIX_PATH_VALUE")"
+fi
+if [[ -n "$COLMAPKIT_IGNORE_PREFIXES" ]]; then
+  CMAKE_IGNORE_PREFIX_PATH_VALUE="$(prepend_cmake_path "$COLMAPKIT_IGNORE_PREFIXES" "$CMAKE_IGNORE_PREFIX_PATH_VALUE")"
 fi
 if [[ -d /opt/anaconda3 ]]; then
-  if [[ -n "$CMAKE_IGNORE_PREFIX_PATH_VALUE" ]]; then
-    CMAKE_IGNORE_PREFIX_PATH_VALUE="/opt/anaconda3;$CMAKE_IGNORE_PREFIX_PATH_VALUE"
-  else
-    CMAKE_IGNORE_PREFIX_PATH_VALUE="/opt/anaconda3"
-  fi
+  CMAKE_IGNORE_PREFIX_PATH_VALUE="$(prepend_cmake_path "/opt/anaconda3" "$CMAKE_IGNORE_PREFIX_PATH_VALUE")"
 fi
 
 if [[ "$COLMAPKIT_CLEAN" == "ON" ]]; then
@@ -71,6 +88,21 @@ if [[ -n "$CMAKE_PREFIX_PATH_VALUE" ]]; then
 fi
 if [[ -n "$CMAKE_IGNORE_PREFIX_PATH_VALUE" ]]; then
   CMAKE_CONFIGURE_ARGS+=("-DCMAKE_IGNORE_PREFIX_PATH=$CMAKE_IGNORE_PREFIX_PATH_VALUE")
+fi
+if [[ -n "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" ]]; then
+  CMAKE_CONFIGURE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=$COLMAPKIT_CMAKE_TOOLCHAIN_FILE")
+fi
+if [[ -n "$COLMAPKIT_CMAKE_MAKE_PROGRAM" ]]; then
+  CMAKE_CONFIGURE_ARGS+=("-DCMAKE_MAKE_PROGRAM=$COLMAPKIT_CMAKE_MAKE_PROGRAM")
+fi
+if [[ -n "$COLMAPKIT_VCPKG_TARGET_TRIPLET" ]]; then
+  CMAKE_CONFIGURE_ARGS+=("-DVCPKG_TARGET_TRIPLET=$COLMAPKIT_VCPKG_TARGET_TRIPLET")
+fi
+if [[ -n "$COLMAPKIT_VCPKG_INSTALLED_DIR" ]]; then
+  CMAKE_CONFIGURE_ARGS+=("-DVCPKG_INSTALLED_DIR=$COLMAPKIT_VCPKG_INSTALLED_DIR")
+fi
+if [[ -n "$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS" ]]; then
+  CMAKE_CONFIGURE_ARGS+=("-DVCPKG_OVERLAY_TRIPLETS=$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS")
 fi
 
 if [[ -n "$LIBOMP_ROOT" ]]; then
@@ -125,19 +157,39 @@ contains_dependency() {
   return "$found"
 }
 
+add_vendored_dependency() {
+  local dependency="$1"
+  if ! contains_dependency "$dependency"; then
+    VENDORED_DEPENDENCIES+=("$dependency")
+    DEPENDENCY_QUEUE+=("$dependency")
+  fi
+}
+
 collect_vendored_dependencies_from() {
   local binary="$1"
   local dependency
   while IFS= read -r dependency; do
-    if is_vendored_dependency "$dependency" && ! contains_dependency "$dependency"; then
-      VENDORED_DEPENDENCIES+=("$dependency")
-      DEPENDENCY_QUEUE+=("$dependency")
+    if is_vendored_dependency "$dependency"; then
+      add_vendored_dependency "$dependency"
     fi
   done < <(otool -L "$binary" | awk 'NR > 1 { print $1 }')
 }
 
+rewrite_dependency_in_binary() {
+  local binary="$1"
+  local old_dependency="$2"
+  local new_dependency="$3"
+  if otool -L "$binary" | awk 'NR > 1 { print $1 }' | grep -Fxq "$old_dependency"; then
+    install_name_tool -change "$old_dependency" "$new_dependency" "$binary"
+  fi
+}
+
 VENDORED_DEPENDENCIES=()
 DEPENDENCY_QUEUE=("$FRAMEWORK_BINARY")
+if [[ -n "$LIBOMP_ROOT" && -f "$LIBOMP_ROOT/lib/libomp.dylib" ]] && \
+  otool -L "$FRAMEWORK_BINARY" | awk 'NR > 1 { print $1 }' | grep -Fxq "@rpath/libomp.dylib"; then
+  add_vendored_dependency "$LIBOMP_ROOT/lib/libomp.dylib"
+fi
 queue_index=0
 while [[ "$queue_index" -lt "${#DEPENDENCY_QUEUE[@]}" ]]; do
   collect_vendored_dependencies_from "${DEPENDENCY_QUEUE[$queue_index]}"
@@ -157,19 +209,33 @@ if [[ "${#VENDORED_DEPENDENCIES[@]}" -gt 0 ]]; then
   done
 
   for dependency in "${VENDORED_DEPENDENCIES[@]}"; do
-    install_name_tool \
-      -change "$dependency" "@loader_path/Frameworks/$(basename "$dependency")" \
-      "$FRAMEWORK_BINARY"
+    dependency_install_name="$(otool -D "$dependency" | awk 'NR == 2 { print $1 }')"
+    rewrite_dependency_in_binary \
+      "$FRAMEWORK_BINARY" \
+      "$dependency" \
+      "@loader_path/Frameworks/$(basename "$dependency")"
+    if [[ -n "$dependency_install_name" && "$dependency_install_name" != "$dependency" ]]; then
+      rewrite_dependency_in_binary \
+        "$FRAMEWORK_BINARY" \
+        "$dependency_install_name" \
+        "@loader_path/Frameworks/$(basename "$dependency")"
+    fi
   done
 
   for dependency in "${VENDORED_DEPENDENCIES[@]}"; do
     copied_dependency="$FRAMEWORK_DEPENDENCIES_DIR/$(basename "$dependency")"
     install_name_tool -id "@loader_path/$(basename "$dependency")" "$copied_dependency"
     for nested_dependency in "${VENDORED_DEPENDENCIES[@]}"; do
-      if otool -L "$copied_dependency" | awk 'NR > 1 { print $1 }' | grep -Fxq "$nested_dependency"; then
-        install_name_tool \
-          -change "$nested_dependency" "@loader_path/$(basename "$nested_dependency")" \
-          "$copied_dependency"
+      nested_dependency_install_name="$(otool -D "$nested_dependency" | awk 'NR == 2 { print $1 }')"
+      rewrite_dependency_in_binary \
+        "$copied_dependency" \
+        "$nested_dependency" \
+        "@loader_path/$(basename "$nested_dependency")"
+      if [[ -n "$nested_dependency_install_name" && "$nested_dependency_install_name" != "$nested_dependency" ]]; then
+        rewrite_dependency_in_binary \
+          "$copied_dependency" \
+          "$nested_dependency_install_name" \
+          "@loader_path/$(basename "$nested_dependency")"
       fi
     done
     codesign --force --sign - "$copied_dependency"
@@ -256,6 +322,17 @@ Primary artifact:
 
 \`\`\`text
 $XCFRAMEWORK_PATH
+\`\`\`
+
+Build inputs:
+
+\`\`\`text
+MACOS_DEPLOYMENT_TARGET=$MACOS_DEPLOYMENT_TARGET
+LIBOMP_ROOT=${LIBOMP_ROOT:-<none>}
+COLMAPKIT_CMAKE_TOOLCHAIN_FILE=${COLMAPKIT_CMAKE_TOOLCHAIN_FILE:-<none>}
+COLMAPKIT_VCPKG_TARGET_TRIPLET=${COLMAPKIT_VCPKG_TARGET_TRIPLET:-<none>}
+COLMAPKIT_VCPKG_INSTALLED_DIR=${COLMAPKIT_VCPKG_INSTALLED_DIR:-<none>}
+COLMAPKIT_VCPKG_OVERLAY_TRIPLETS=${COLMAPKIT_VCPKG_OVERLAY_TRIPLETS:-<none>}
 \`\`\`
 
 Dynamic dependency audit:

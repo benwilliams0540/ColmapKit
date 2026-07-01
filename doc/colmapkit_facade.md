@@ -145,7 +145,13 @@ database and sparse model metrics:
 Validated macOS framework package:
 
 ```bash
-bash scripts/build_colmapkit_xcframework.sh
+COLMAPKIT_CMAKE_TOOLCHAIN_FILE=/private/tmp/colmap-vcpkg/scripts/buildsystems/vcpkg.cmake \
+COLMAPKIT_VCPKG_TARGET_TRIPLET=arm64-osx-release-macos15 \
+COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-macos15 \
+COLMAPKIT_CMAKE_MAKE_PROGRAM=/private/tmp/colmap-vcpkg/downloads/tools/ninja-1.13.2-osx/ninja \
+COLMAPKIT_IGNORE_PREFIXES='/opt/homebrew;/usr/local' \
+LIBOMP_ROOT="$PWD/dist/libomp-macos15.0" \
+scripts/build_colmapkit_xcframework.sh
 ```
 
 This produces:
@@ -153,12 +159,15 @@ This produces:
 ```text
 dist/colmapkit/ColmapKit.xcframework
 dist/colmapkit/ColmapKit-otool-L.txt
+dist/colmapkit/ColmapKit-codesign.txt
+dist/colmapkit/ColmapKit-deployment-targets.txt
+dist/colmapkit/ColmapKit-deployment-mismatches.txt
 ```
 
 Validated Swift import and call:
 
 ```bash
-swift -module-cache-path /private/tmp/colmapkit-swift-module-cache \
+xcrun swift -module-cache-path .build/swift-module-cache \
   -F dist/colmapkit/ColmapKit.xcframework/macos-arm64 \
   -framework ColmapKit \
   -e 'import ColmapKit; print(String(cString: ColmapKitVersion()))'
@@ -167,7 +176,7 @@ swift -module-cache-path /private/tmp/colmapkit-swift-module-cache \
 Result:
 
 ```text
-COLMAP 4.2.0.dev0 (Commit 409bbded on 2026-06-30 without CUDA)
+COLMAP 4.2.0.dev0 (Commit 2918211e on 2026-07-01 without CUDA)
 ```
 
 ## Packaging Evidence and Remaining Blockers
@@ -178,42 +187,31 @@ The current blocker matrix is maintained in:
 doc/colmapkit_packaging_blockers.md
 ```
 
-A fresh reduced configure with `OPENMP_ENABLED=OFF` now skips COLMAP's direct
-OpenMP lookup, but Homebrew's `CHOLMODConfig.cmake` still calls
-`find_dependency(OpenMP COMPONENTS C)` because that CHOLMOD package was built
-with OpenMP support. This means the packaging agent must either:
+The macOS arm64 package is self-contained for the current Splats target policy.
+The dependency closure is built with the checked-in vcpkg triplet
+`cmake/vcpkg-triplets/arm64-osx-release-macos15.cmake`, and OpenMP is supplied by
+`scripts/build_libomp_macos.sh` instead of the Homebrew `libomp` bottle.
 
-- make OpenMP discoverable and include it in the dependency audit, or
-- provide/use a SuiteSparse/CHOLMOD build that does not require OpenMP.
-
-This is a real dependency-closure blocker for an Apple XCFramework build and
-should be tracked separately from ColmapKit API work.
-
-The package script works around the local OpenMP lookup by making Homebrew
-`libomp` discoverable and avoids local Conda package leakage with
-`CMAKE_IGNORE_PREFIX_PATH=/opt/anaconda3`.
-
-The generated macOS framework is a local proof artifact, not a shippable
-binary. `otool -L` still reports runtime dependencies on Homebrew dylibs:
-
-- Boost
-- Ceres Solver
-- OpenImageIO
-- glog
-- gflags
-- Metis
-- libomp
-- SuiteSparse/CHOLMOD
-
-The link also warns that these Homebrew dylibs were built for macOS 26.0 while
-the current package script targets macOS 13.0. A production package needs
-either static/vendored dependency closure or a deliberate dependency bundling
-and signing strategy.
-
-Signing has not been performed. Current verification result:
+Current `otool -L` evidence shows only system frameworks/libraries plus the
+vendored runtime:
 
 ```text
-dist/colmapkit/ColmapKit.xcframework: code object is not signed at all
+@loader_path/Frameworks/libomp.dylib
+```
+
+Current deployment evidence:
+
+```text
+ColmapKit minOS: 15.0
+Vendored libomp.dylib minOS: 15.0
+Deployment mismatches: 0
+```
+
+Current signing verification:
+
+```text
+dist/colmapkit/ColmapKit.xcframework: valid on disk
+dist/colmapkit/ColmapKit.xcframework: satisfies its Designated Requirement
 ```
 
 ## iOS Probe Evidence
