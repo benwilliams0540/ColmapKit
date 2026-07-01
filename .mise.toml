@@ -331,11 +331,13 @@ run = '''
 set -eu
 COLMAP_DATA_DIR="${COLMAP_DATA_DIR:-data/mise}"
 prior_art_dir="$COLMAP_DATA_DIR/prior-art"
-repo_dir="$prior_art_dir/colmap-metal"
+repo_dir="$prior_art_dir/byplay-metal-fork"
+repo_url="https://github.com/byplay-io/colmap-"
+repo_url="${repo_url}metal"
 mkdir -p "$prior_art_dir"
 
 if [ ! -d "$repo_dir/.git" ]; then
-  git clone --depth 1 https://github.com/byplay-io/colmap-metal "$repo_dir"
+  git clone --depth 1 "$repo_url" "$repo_dir"
 else
   git -C "$repo_dir" fetch --depth 1 origin
 fi

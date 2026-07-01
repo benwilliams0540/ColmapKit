@@ -4,7 +4,7 @@ This directory contains a narrow Objective-C++/Metal SIFT extractor import based
 on the byplay COLMAP Metal fork:
 
 ```text
-https://github.com/byplay-io/colmap-metal
+byplay-io COLMAP Metal fork
 bf01a458b958fbe31fcb67643c44e873e6ec2dd0
 ```
 

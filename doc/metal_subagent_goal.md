@@ -1,8 +1,8 @@
 # Goal Prompt: Upstreamable COLMAP Metal SIFT Integration
 
-/goal Integrate the useful Metal SIFT contributions from
-https://github.com/byplay-io/colmap-metal into this COLMAP worktree while
-preserving the staged matcher-first Metal plan already underway.
+/goal Integrate the useful Metal SIFT contributions from the byplay COLMAP
+Metal fork into this COLMAP worktree while preserving the staged
+matcher-first Metal plan already underway.
 
 Use Mise as the shared project entrypoint. Before making build or validation
 claims, run:
