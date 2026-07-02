@@ -5,11 +5,32 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_ROOT="${COLMAPKIT_IOS_BUILD_ROOT:-"$ROOT_DIR/build-colmapkit-ios-probe"}"
 DIST_ROOT="${COLMAPKIT_IOS_DIST_ROOT:-"$ROOT_DIR/dist/colmapkit-ios-probe"}"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
-IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-17.0}"
+IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
 COLMAPKIT_CLEAN="${COLMAPKIT_CLEAN:-ON}"
 COLMAPKIT_IOS_STRICT_DEPS="${COLMAPKIT_IOS_STRICT_DEPS:-ON}"
 COLMAPKIT_IOS_BUILD="${COLMAPKIT_IOS_BUILD:-ON}"
 COLMAPKIT_IOS_FAIL_ON_BLOCKER="${COLMAPKIT_IOS_FAIL_ON_BLOCKER:-OFF}"
+COLMAPKIT_IOS_USE_VCPKG="${COLMAPKIT_IOS_USE_VCPKG:-OFF}"
+COLMAPKIT_VCPKG_ROOT="${COLMAPKIT_VCPKG_ROOT:-${VCPKG_ROOT:-}}"
+COLMAPKIT_CMAKE_TOOLCHAIN_FILE="${COLMAPKIT_CMAKE_TOOLCHAIN_FILE:-${CMAKE_TOOLCHAIN_FILE:-}}"
+COLMAPKIT_CMAKE_MAKE_PROGRAM="${COLMAPKIT_CMAKE_MAKE_PROGRAM:-${CMAKE_MAKE_PROGRAM:-}}"
+COLMAPKIT_VCPKG_INSTALLED_DIR="${COLMAPKIT_VCPKG_INSTALLED_DIR:-${VCPKG_INSTALLED_DIR:-}}"
+COLMAPKIT_VCPKG_OVERLAY_TRIPLETS="${COLMAPKIT_VCPKG_OVERLAY_TRIPLETS:-${VCPKG_OVERLAY_TRIPLETS:-}}"
+COLMAPKIT_IOS_DEVICE_VCPKG_TARGET_TRIPLET="${COLMAPKIT_IOS_DEVICE_VCPKG_TARGET_TRIPLET:-arm64-ios-release}"
+COLMAPKIT_IOS_SIMULATOR_VCPKG_TARGET_TRIPLET="${COLMAPKIT_IOS_SIMULATOR_VCPKG_TARGET_TRIPLET:-arm64-ios-simulator-release}"
+COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES="${COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES:-ON}"
+
+if [[ -z "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" && -n "$COLMAPKIT_VCPKG_ROOT" ]]; then
+  COLMAPKIT_CMAKE_TOOLCHAIN_FILE="$COLMAPKIT_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+fi
+if [[ -z "$COLMAPKIT_CMAKE_MAKE_PROGRAM" && -n "$COLMAPKIT_VCPKG_ROOT" ]]; then
+  COLMAPKIT_CMAKE_MAKE_PROGRAM="$(
+    find "$COLMAPKIT_VCPKG_ROOT/downloads/tools" -type f -name ninja -print -quit 2>/dev/null || true
+  )"
+fi
+if [[ -z "$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS" && -d "$ROOT_DIR/cmake/vcpkg-triplets" ]]; then
+  COLMAPKIT_VCPKG_OVERLAY_TRIPLETS="$ROOT_DIR/cmake/vcpkg-triplets"
+fi
 
 mkdir -p "$DIST_ROOT"
 SUMMARY_PATH="$DIST_ROOT/summary.md"
@@ -29,6 +50,13 @@ Settings:
 - iOS deployment target: $IOS_DEPLOYMENT_TARGET
 - Strict dependency mode: $COLMAPKIT_IOS_STRICT_DEPS
 - Build after configure: $COLMAPKIT_IOS_BUILD
+- vcpkg mode: $COLMAPKIT_IOS_USE_VCPKG
+- vcpkg root: ${COLMAPKIT_VCPKG_ROOT:-unset}
+- vcpkg toolchain: ${COLMAPKIT_CMAKE_TOOLCHAIN_FILE:-unset}
+- CMake make program: ${COLMAPKIT_CMAKE_MAKE_PROGRAM:-default}
+- vcpkg installed dir: ${COLMAPKIT_VCPKG_INSTALLED_DIR:-default}
+- vcpkg overlay triplets: ${COLMAPKIT_VCPKG_OVERLAY_TRIPLETS:-unset}
+- vcpkg default manifest features disabled: $COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES
 
 SUMMARY
 
@@ -56,6 +84,7 @@ run_slice() {
   local sdk_name="$2"
   local system_name="$3"
   local architectures="$4"
+  local vcpkg_triplet="$5"
 
   local build_dir="$BUILD_ROOT/$label"
   local configure_log="$DIST_ROOT/$label-configure.log"
@@ -97,6 +126,27 @@ run_slice() {
     -DBUILD_SHARED_LIBS=OFF
   )
 
+  if [[ "$COLMAPKIT_IOS_USE_VCPKG" == "ON" ]]; then
+    if [[ -z "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" || ! -f "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" ]]; then
+      append_summary "- Configure status: skipped"
+      append_summary "- Result: vcpkg mode requested, but no usable vcpkg toolchain file was found."
+      append_summary ""
+      return 1
+    fi
+    configure_args+=("-DCMAKE_TOOLCHAIN_FILE=$COLMAPKIT_CMAKE_TOOLCHAIN_FILE")
+    configure_args+=("-DVCPKG_TARGET_TRIPLET=$vcpkg_triplet")
+    configure_args+=("-DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=$COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES")
+    if [[ -n "$COLMAPKIT_CMAKE_MAKE_PROGRAM" ]]; then
+      configure_args+=("-DCMAKE_MAKE_PROGRAM=$COLMAPKIT_CMAKE_MAKE_PROGRAM")
+    fi
+    if [[ -n "$COLMAPKIT_VCPKG_INSTALLED_DIR" ]]; then
+      configure_args+=("-DVCPKG_INSTALLED_DIR=$COLMAPKIT_VCPKG_INSTALLED_DIR")
+    fi
+    if [[ -n "$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS" ]]; then
+      configure_args+=("-DVCPKG_OVERLAY_TRIPLETS=$COLMAPKIT_VCPKG_OVERLAY_TRIPLETS")
+    fi
+  fi
+
   if [[ "$COLMAPKIT_IOS_STRICT_DEPS" == "ON" ]]; then
     local ignore_prefix_path
     ignore_prefix_path="$(make_ignore_prefix_path)"
@@ -112,6 +162,7 @@ run_slice() {
   append_summary "- SDK: $sdk_name"
   append_summary "- SDK path: $sdk_path"
   append_summary "- Architectures: $architectures"
+  append_summary "- vcpkg triplet: ${vcpkg_triplet:-none}"
   append_summary "- Configure log: \`$configure_log\`"
   append_summary "- Build log: \`$build_log\`"
 
@@ -164,11 +215,11 @@ run_slice() {
 
 failures=0
 
-if ! run_slice ios-arm64 iphoneos iOS arm64; then
+if ! run_slice ios-arm64 iphoneos iOS arm64 "$COLMAPKIT_IOS_DEVICE_VCPKG_TARGET_TRIPLET"; then
   failures=$((failures + 1))
 fi
 
-if ! run_slice ios-simulator-arm64 iphonesimulator iOS arm64; then
+if ! run_slice ios-simulator-arm64 iphonesimulator iOS arm64 "$COLMAPKIT_IOS_SIMULATOR_VCPKG_TARGET_TRIPLET"; then
   failures=$((failures + 1))
 fi
 
