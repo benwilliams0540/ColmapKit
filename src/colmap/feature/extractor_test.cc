@@ -29,6 +29,7 @@
 
 #include "colmap/feature/extractor.h"
 
+#include "colmap/controllers/option_manager.h"
 #include "colmap/feature/aliked.h"
 #include "colmap/feature/sift.h"
 #include "colmap/util/testing.h"
@@ -150,6 +151,37 @@ TEST(FeatureExtractionOptions, CheckAndRequiresOpenGLWithNoGpu) {
     EXPECT_TRUE(options.Check());
     EXPECT_FALSE(options.RequiresOpenGL());
   }
+}
+
+TEST(FeatureExtractionOptions, SiftMetalRequiresNoOpenGL) {
+  FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+  options.use_gpu = true;
+  options.sift->use_metal = true;
+
+  EXPECT_FALSE(options.RequiresOpenGL());
+#if defined(COLMAP_SIFT_METAL_ENABLED)
+  EXPECT_TRUE(options.Check());
+#else
+  EXPECT_FALSE(options.Check());
+#endif
+}
+
+TEST(FeatureExtractionOptions, ParsesSiftFallbackOptions) {
+  OptionManager options(/*add_project_options=*/false);
+  options.AddFeatureExtractionOptions();
+
+  char arg0[] = "test";
+  char arg1[] = "--SiftExtraction.darkness_adaptivity";
+  char arg2[] = "1";
+  char arg3[] = "--SiftExtraction.force_covariant_extractor";
+  char arg4[] = "1";
+  char* argv[] = {arg0, arg1, arg2, arg3, arg4};
+
+  EXPECT_TRUE(options.Parse(5, argv));
+  EXPECT_TRUE(options.feature_extraction->sift->darkness_adaptivity);
+  EXPECT_TRUE(options.feature_extraction->sift->force_covariant_extractor);
+  EXPECT_TRUE(
+      RequiresCovariantSiftExtractor(*options.feature_extraction->sift));
 }
 
 }  // namespace

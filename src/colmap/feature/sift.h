@@ -36,6 +36,8 @@
 #include "colmap/feature/resources.h"
 #include "colmap/util/cache.h"
 
+#include <string>
+
 namespace colmap {
 
 struct SiftExtractionOptions {
@@ -71,6 +73,10 @@ struct SiftExtractionOptions {
   // Note that this feature is only available in the OpenGL SiftGPU version.
   bool darkness_adaptivity = false;
 
+  // Whether to use the Apple Metal SIFT extractor when GPU extraction is
+  // enabled. Unsupported SIFT modes fall back to the CPU extractor.
+  bool use_metal = false;
+
   // Domain-size pooling parameters. Domain-size pooling computes an average
   // SIFT descriptor across multiple scales around the detected scale. This was
   // proposed in "Domain-Size Pooling in Local Descriptors and Network
@@ -100,6 +106,27 @@ struct SiftExtractionOptions {
   bool Check() const;
 };
 
+// Testable mirror of the options passed to the experimental SiftMetal backend.
+// Descriptor normalization is intentionally not listed here: SiftMetal returns
+// float descriptors and COLMAP applies the requested normalization afterwards.
+struct MetalSiftExtractionOptions {
+  int num_octaves = -1;
+  int scales_per_octave = 3;
+  int first_octave = -1;
+  float peak_threshold = 0.0133f;
+  float edge_threshold = 10.0f;
+  int max_num_features = 8192;
+  int max_num_orientations = 2;
+  bool upright = false;
+};
+
+bool RequiresCovariantSiftExtractor(const SiftExtractionOptions& options);
+
+std::string DescribeMetalSiftFallback(const SiftExtractionOptions& options);
+
+MetalSiftExtractionOptions CreateMetalSiftExtractionOptions(
+    const SiftExtractionOptions& options);
+
 // Create a Sift feature extractor based on the provided options. The same
 // feature extractor instance can be used to extract features for multiple
 // images in the same thread. Note that, for GPU based extraction, a OpenGL
@@ -121,6 +148,10 @@ struct SiftMatchingOptions {
 
   // Whether to use brute-force instead of faiss based CPU matching.
   bool cpu_brute_force_matcher = false;
+
+  // Whether to use the Apple Metal descriptor matcher for SIFT brute-force
+  // matching. Guided matching currently falls back to the CPU brute-force path.
+  bool use_metal = false;
 
   // Cache for reusing descriptor index for feature matching.
   ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>*

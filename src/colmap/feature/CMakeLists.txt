@@ -52,6 +52,7 @@ COLMAP_ADD_LIBRARY(
         extractor.h extractor.cc
         index.h index.cc
         matcher.h matcher.cc
+        metal_matcher.h metal_matcher.cc
         onnx_matchers.h onnx_matchers.cc
         onnx_utils.h onnx_utils.cc
         sift.h sift.cc
@@ -69,6 +70,17 @@ COLMAP_ADD_LIBRARY(
         Eigen3::Eigen
         faiss
 )
+
+if(APPLE AND METAL_ENABLED)
+    target_sources(colmap_feature PRIVATE metal_matcher.mm)
+    target_link_libraries(colmap_feature PRIVATE
+        ${COLMAP_METAL_LIBRARIES}
+    )
+endif()
+
+if(APPLE AND SIFT_METAL_ENABLED)
+    target_link_libraries(colmap_feature PRIVATE colmap_sift_metal)
+endif()
 
 if(GPU_ENABLED)
     target_link_libraries(colmap_feature PRIVATE colmap_sift_gpu)
@@ -104,7 +116,9 @@ endif()
 COLMAP_ADD_TEST(
     NAME extractor_test
     SRCS extractor_test.cc
-    LINK_LIBS colmap_feature
+    LINK_LIBS
+        colmap_feature
+        colmap_controllers
 )
 COLMAP_ADD_TEST(
     NAME index_test
@@ -114,6 +128,11 @@ COLMAP_ADD_TEST(
 COLMAP_ADD_TEST(
     NAME matcher_test
     SRCS matcher_test.cc
+    LINK_LIBS colmap_feature
+)
+COLMAP_ADD_TEST(
+    NAME metal_matcher_test
+    SRCS metal_matcher_test.cc
     LINK_LIBS colmap_feature
 )
 COLMAP_ADD_TEST(

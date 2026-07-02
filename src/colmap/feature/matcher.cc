@@ -83,6 +83,9 @@ FeatureMatchingOptions::FeatureMatchingOptions(FeatureMatcherType type)
 bool FeatureMatchingOptions::RequiresOpenGL() const {
   switch (type) {
     case FeatureMatcherType::SIFT_BRUTEFORCE: {
+      if (use_gpu && sift != nullptr && sift->use_metal) {
+        return false;
+      }
 #ifdef COLMAP_CUDA_ENABLED
       return false;
 #else
@@ -102,11 +105,21 @@ bool FeatureMatchingOptions::RequiresOpenGL() const {
 bool FeatureMatchingOptions::Check() const {
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
-#ifndef COLMAP_GPU_ENABLED
-    LOG(ERROR) << "Cannot use GPU feature matching without CUDA or OpenGL "
-                  "support. Set use_gpu or use_gpu to false.";
-    return false;
+    if (type == FeatureMatcherType::SIFT_BRUTEFORCE && sift != nullptr &&
+        sift->use_metal) {
+#ifndef COLMAP_METAL_ENABLED
+      LOG(ERROR) << "Cannot use Metal feature matching without Metal support. "
+                    "Set SiftMatching.use_metal to false or configure with "
+                    "-DMETAL_ENABLED=ON on macOS.";
+      return false;
 #endif
+    } else {
+#ifndef COLMAP_GPU_ENABLED
+      LOG(ERROR) << "Cannot use GPU feature matching without CUDA or OpenGL "
+                    "support. Set FeatureMatching.use_gpu to false.";
+      return false;
+#endif
+    }
   }
   CHECK_OPTION_GE(max_num_matches, 0);
   switch (type) {

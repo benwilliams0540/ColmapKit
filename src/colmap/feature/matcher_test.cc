@@ -119,5 +119,18 @@ TEST(FeatureMatchingOptions, Check) {
   }
 }
 
+TEST(FeatureMatchingOptions, SiftMetalRequiresNoOpenGL) {
+  FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+  options.use_gpu = true;
+  options.sift->use_metal = true;
+
+  EXPECT_FALSE(options.RequiresOpenGL());
+#if defined(COLMAP_METAL_ENABLED)
+  EXPECT_TRUE(options.Check());
+#else
+  EXPECT_FALSE(options.Check());
+#endif
+}
+
 }  // namespace
 }  // namespace colmap

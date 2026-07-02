@@ -103,6 +103,9 @@ bool FeatureExtractionOptions::RequiresOpenGL() const {
 #ifdef COLMAP_CUDA_ENABLED
       return false;
 #else
+      if (use_gpu && sift->use_metal) {
+        return false;
+      }
       return use_gpu;
 #endif
     }
@@ -136,11 +139,21 @@ bool FeatureExtractionOptions::Check() const {
   CHECK_OPTION_GT(EffMaxImageSize(), 0);
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
-#if !defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_CUDA_ENABLED)
-    LOG(ERROR) << "Cannot use GPU feature extraction without CUDA or OpenGL "
-                  "support. Consider setting use_gpu to false.";
-    return false;
+    if (type == FeatureExtractorType::SIFT && sift != nullptr &&
+        sift->use_metal) {
+#ifndef COLMAP_SIFT_METAL_ENABLED
+      LOG(ERROR) << "Cannot use Metal SIFT feature extraction without Metal "
+                    "support. Set SiftExtraction.use_metal to false or "
+                    "configure with -DSIFT_METAL_ENABLED=ON on macOS.";
+      return false;
 #endif
+    } else {
+#ifndef COLMAP_GPU_ENABLED
+      LOG(ERROR) << "Cannot use GPU feature extraction without CUDA or OpenGL "
+                    "support. Consider setting use_gpu to false.";
+      return false;
+#endif
+    }
   }
   switch (type) {
     case FeatureExtractorType::SIFT:

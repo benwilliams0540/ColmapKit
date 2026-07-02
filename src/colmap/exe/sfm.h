@@ -35,6 +35,7 @@
 #include "colmap/scene/reconstruction_manager.h"
 
 #include <filesystem>
+#include <functional>
 
 namespace colmap {
 
@@ -54,7 +55,8 @@ bool RunIncrementalMapperImpl(
     const std::shared_ptr<IncrementalPipelineOptions>& mapper_options,
     std::shared_ptr<ReconstructionManager>& reconstruction_manager,
     std::function<void()> initial_image_pair_callback = {},
-    std::function<void()> next_image_callback = {});
+    std::function<void()> next_image_callback = {},
+    std::function<bool()> check_if_stopped = {});
 
 bool RunGlobalMapperImpl(
     const std::filesystem::path& database_path,

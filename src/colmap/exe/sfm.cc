@@ -234,7 +234,8 @@ bool RunIncrementalMapperImpl(
     const std::shared_ptr<IncrementalPipelineOptions>& mapper_options,
     std::shared_ptr<ReconstructionManager>& reconstruction_manager,
     std::function<void()> initial_image_pair_callback,
-    std::function<void()> next_image_callback) {
+    std::function<void()> next_image_callback,
+    std::function<bool()> check_if_stopped) {
   // If fix_existing_frames is enabled, we store the initial positions of
   // existing images in order to transform them back to the original coordinate
   // frame, as the reconstruction is normalized multiple times for numerical
@@ -252,6 +253,9 @@ bool RunIncrementalMapperImpl(
   auto database = Database::Open(database_path);
 
   IncrementalPipeline mapper(mapper_options, database, reconstruction_manager);
+  if (check_if_stopped) {
+    mapper.SetCheckIfStoppedFunc(std::move(check_if_stopped));
+  }
 
   // In case a new reconstruction is started, write results of individual sub-
   // models to as their reconstruction finishes instead of writing all results

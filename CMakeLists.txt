@@ -38,6 +38,8 @@ option(SIMD_ENABLED "Whether to enable SIMD optimizations" ON)
 option(OPENMP_ENABLED "Whether to enable OpenMP parallelization" ON)
 option(IPO_ENABLED "Whether to enable interprocedural optimization" ON)
 option(CUDA_ENABLED "Whether to enable CUDA, if available" ON)
+option(METAL_ENABLED "Whether to enable Apple Metal feature matching, if available" OFF)
+option(SIFT_METAL_ENABLED "Whether to enable experimental Apple Metal SIFT extraction, if available" OFF)
 option(ONNX_ENABLED "Whether to enable ONNX, if available" ON)
 option(GUI_ENABLED "Whether to enable the graphical UI" ON)
 option(MVS_ENABLED "Whether to enable the Multi-View Stereo module" ON)
@@ -60,6 +62,7 @@ option(FETCH_FAISS "Whether to consume faiss using FetchContent or find_package"
 option(FETCH_ONNX "Whether to consume ONNX using FetchContent or find_package" ON)
 option(BUILD_SHARED_LIBS "Whether to build shared libraries (faster linktime, slower runtime)" OFF)
 option(ALL_SOURCE_TARGET "Whether to create a target for all source files (for Visual Studio / XCode development)" OFF)
+option(COLMAPKIT_FRAMEWORK_ENABLED "Whether to build the Apple ColmapKit.framework target" OFF)
 
 # Experimental
 option(CASPAR_ENABLED "Whether to enable CASPAR-accelerated bundle adjustment" OFF)
@@ -96,7 +99,15 @@ if(DOWNLOAD_ENABLED)
     list(APPEND VCPKG_MANIFEST_FEATURES "download")
 endif()
 
-project(COLMAP LANGUAGES C CXX)
+if(SIFT_METAL_ENABLED AND NOT METAL_ENABLED)
+    set(METAL_ENABLED ON CACHE BOOL "Whether to enable Apple Metal feature matching, if available" FORCE)
+endif()
+
+if(APPLE AND METAL_ENABLED)
+    project(COLMAP LANGUAGES C CXX OBJCXX)
+else()
+    project(COLMAP LANGUAGES C CXX)
+endif()
 
 set(COLMAP_VERSION "4.2.0.dev0")
 
@@ -104,6 +115,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(APPLE AND METAL_ENABLED)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 
 set_property(GLOBAL PROPERTY GLOBAL_DEPENDS_NO_CYCLES ON)
 
@@ -299,6 +314,7 @@ endif()
 ################################################################################
 
 COLMAP_ADD_SOURCE_DIR(src/colmap/controllers CONTROLLERS_SRCS *.h *.cc)
+COLMAP_ADD_SOURCE_DIR(src/colmap/colmapkit COLMAPKIT_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators ESTIMATORS_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators/cost_functions ESTIMATORS_COST_FUNCTIONS_SRCS *.h *.cc)
 COLMAP_ADD_SOURCE_DIR(src/colmap/estimators/solvers ESTIMATORS_SOLVERS_SRCS *.h *.cc)
@@ -332,6 +348,7 @@ COLMAP_ADD_SOURCE_DIR(src/thirdparty/VLFeat THIRDPARTY_VLFEAT_SRCS *.h *.c *.tc)
 if(ALL_SOURCE_TARGET)
     set(ALL_SRCS
         ${CONTROLLERS_SRCS}
+        ${COLMAPKIT_SRCS}
         ${ESTIMATORS_SRCS}
         ${ESTIMATORS_COST_FUNCTIONS_SRCS}
         ${ESTIMATORS_SOLVERS_SRCS}
@@ -406,6 +423,7 @@ endif()
 set(COLMAP_EXPORT_LIBS
     # Internal.
     colmap_controllers
+    colmap_colmapkit
     colmap_estimators
     colmap_estimators_cost_functions
     colmap_estimators_solvers
@@ -451,6 +469,11 @@ endif()
 if(GPU_ENABLED)
     list(APPEND COLMAP_EXPORT_LIBS
          colmap_sift_gpu
+    )
+endif()
+if(SIFT_METAL_ENABLED)
+    list(APPEND COLMAP_EXPORT_LIBS
+         colmap_sift_metal
     )
 endif()
 if(FETCH_POSELIB)

@@ -164,6 +164,10 @@ void BindFeatureExtraction(py::module& m) {
                          &SiftExtractionOptions::darkness_adaptivity,
                          "Whether to adapt the feature detection depending "
                          "on the image darkness. only available on GPU.")
+          .def_readwrite("use_metal",
+                         &SiftExtractionOptions::use_metal,
+                         "Whether to use the Apple Metal SIFT extractor when "
+                         "GPU extraction is enabled.")
           .def_readwrite(
               "domain_size_pooling",
               &SiftExtractionOptions::domain_size_pooling,

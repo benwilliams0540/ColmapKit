@@ -1,0 +1,7 @@
+framework module ColmapKit {
+  umbrella header "colmapkit.h"
+
+  export *
+  module * { export * }
+}
+

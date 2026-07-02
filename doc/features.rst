@@ -36,6 +36,29 @@ For SIFT (the default), you can omit the type or explicitly set it::
         --FeatureExtraction.type SIFT \
         --SiftExtraction.max_num_features 8192
 
+On macOS builds configured with ``-DMETAL_ENABLED=ON`` and
+``-DSIFT_METAL_ENABLED=ON``, SIFT extraction can use the experimental SiftMetal
+extractor::
+
+    $ colmap feature_extractor \
+        --database_path $DATASET_PATH/database.db \
+        --image_path $DATASET_PATH/images \
+        --FeatureExtraction.type SIFT \
+        --FeatureExtraction.use_gpu 1 \
+        --SiftExtraction.use_metal 1
+
+The SiftMetal extractor is Apple-only, opt-in, and experimental. It stores the
+same COLMAP SIFT keypoint and ``128``-dimensional ``uint8`` descriptor database
+format as the CPU, CUDA, and OpenGL/SiftGPU paths, but the detected features
+and descriptor values are not expected to be bit-identical to VLFeat or
+SiftGPU. Affine-shape estimation, domain-size pooling, and forced covariant
+extraction remain on the CPU covariant SIFT path. Darkness adaptivity is only
+available in the OpenGL SiftGPU path. The current SiftMetal extractor uses one
+Metal worker while descriptor parity, memory bounds, and scheduling are being
+validated. Installed Metal builds look for ``sift.metallib`` next to the
+installed COLMAP resources; this can be overridden with the
+``COLMAP_SIFT_METAL_METALLIB`` environment variable.
+
 In the GUI, open ``Processing > Feature extraction`` and select the desired
 tab (SIFT, ALIKED, etc.) before clicking Extract.
 
@@ -73,6 +96,25 @@ For SIFT matching (the default)::
         --database_path $DATASET_PATH/database.db \
         --FeatureMatching.type SIFT_BRUTEFORCE \
         --SiftMatching.max_ratio 0.8
+
+On macOS builds configured with ``-DMETAL_ENABLED=ON``, SIFT brute-force
+matching can use the Metal descriptor matcher::
+
+    $ colmap exhaustive_matcher \
+        --database_path $DATASET_PATH/database.db \
+        --FeatureMatching.type SIFT_BRUTEFORCE \
+        --FeatureMatching.use_gpu 1 \
+        --SiftMatching.use_metal 1
+
+The Metal matcher consumes the same ``128``-dimensional ``uint8`` SIFT
+descriptors as the CPU, FAISS, CUDA, and OpenGL paths. It applies the Lowe
+ratio, maximum distance, and cross-check filters with deterministic
+query-index ordering. It does not require the SiftMetal extractor or shader
+tooling. If a Metal device or pipeline is unavailable at runtime, the matcher
+falls back to the same deterministic CPU implementation used by the Metal test
+path and logs a warning once. Guided matching is not Metal-accelerated yet; when
+``--FeatureMatching.guided_matching 1`` is selected, the guided refinement step
+falls back to the existing CPU brute-force guided matcher.
 
 In the GUI, open ``Processing > Feature matching``, select any matching tab
 (Exhaustive, Sequential, etc.), and choose the matcher type from the "Type"

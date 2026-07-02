@@ -398,33 +398,50 @@ class FeatureExtractorController : public Thread {
           max_image_size, resizer_queue_.get(), extractor_queue_.get()));
     }
 
-    // Determine if GPU extraction should be used. SIFT GPU extraction is not
-    // supported with domain_size_pooling or estimate_affine_shape, which
-    // require CPU-based covariant SIFT.
+    // Determine if GPU extraction should be used. Affine shape estimation,
+    // domain-size pooling, and forced covariant extraction require CPU-based
+    // covariant SIFT.
     auto worker_extraction_options = extraction_options_;
     if (extraction_options_.type == FeatureExtractorType::SIFT &&
-        (extraction_options_.sift->domain_size_pooling ||
-         extraction_options_.sift->estimate_affine_shape)) {
+        RequiresCovariantSiftExtractor(*extraction_options_.sift)) {
       worker_extraction_options.use_gpu = false;
     }
+    const bool use_metal_sift =
+        worker_extraction_options.type == FeatureExtractorType::SIFT &&
+        worker_extraction_options.sift != nullptr &&
+        worker_extraction_options.sift->use_metal;
 
     if (worker_extraction_options.use_gpu) {
       std::vector<int> gpu_indices =
           CSVToVector<int>(extraction_options_.gpu_index);
       THROW_CHECK_GT(gpu_indices.size(), 0);
 
+      if (use_metal_sift) {
+        LOG(INFO) << "Metal SIFT extraction uses one extractor worker on the "
+                     "default Metal device.";
+        if (gpu_indices.size() != 1 || gpu_indices[0] != -1) {
+          LOG(WARNING)
+              << "Metal SIFT extraction does not select devices through "
+                 "FeatureExtraction.gpu_index; ignoring requested gpu_index="
+              << extraction_options_.gpu_index << ".";
+        }
+        gpu_indices = {-1};
+      } else {
 #if defined(COLMAP_CUDA_ENABLED)
-      if (gpu_indices.size() == 1 && gpu_indices[0] == -1) {
-        const int num_cuda_devices = GetNumCudaDevices();
-        THROW_CHECK_GT(num_cuda_devices, 0);
-        gpu_indices.resize(num_cuda_devices);
-        std::iota(gpu_indices.begin(), gpu_indices.end(), 0);
-      }
+        if (gpu_indices.size() == 1 && gpu_indices[0] == -1) {
+          const int num_cuda_devices = GetNumCudaDevices();
+          THROW_CHECK_GT(num_cuda_devices, 0);
+          gpu_indices.resize(num_cuda_devices);
+          std::iota(gpu_indices.begin(), gpu_indices.end(), 0);
+        }
 #endif  // COLMAP_CUDA_ENABLED
+      }
 
       // Prevent nested threading, as we multi-thread at the controller level.
       worker_extraction_options.num_threads =
-          std::max(num_threads / static_cast<int>(gpu_indices.size()), 1);
+          use_metal_sift
+              ? 1
+              : std::max(num_threads / static_cast<int>(gpu_indices.size()), 1);
 
       for (const int gpu_index : gpu_indices) {
         worker_extraction_options.gpu_index = std::to_string(gpu_index);
