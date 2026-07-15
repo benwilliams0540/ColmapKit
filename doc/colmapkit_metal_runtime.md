@@ -6,7 +6,8 @@ Date: 2026-06-30
 
 - Proven behavior for COLMAP-side sparse parity is CPU-based:
   - `colmapkit_sparse_reconstruct` is functionally aligned with CLI sparse reconstruction metrics on the synthetic fixture when `--use_metal_matching` is disabled.
-- The macOS XCFramework shape has been proved for build form and importability.
+- The macOS XCFramework and arm64 iPhoneOS/iPhoneSimulator XCFramework shapes
+  have been proved for build form and import/link compatibility.
 - Runtime acceleration has not yet been proven in this integration slice.
   - Metal matcher binaries are compiled and exposed.
   - Runtime execution still falls back to deterministic CPU matching on the tested host.
@@ -41,4 +42,3 @@ Observed:
 1. Keep Splats embedded default at CPU SIFT + CPU matching for now (proven baseline).
 2. Treat Metal matching as first acceleration candidate, but only after end-to-end no-fallback execution is proven in the packaging/runtime environment.
 3. Keep SiftMetal extraction explicitly off by default in the embedded path until framework resource loading and runtime correctness are validated in end-to-end Splats use.
-
