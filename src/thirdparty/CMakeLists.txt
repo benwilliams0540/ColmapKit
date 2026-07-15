@@ -60,6 +60,11 @@ if(FETCH_FAISS)
     FetchContent_Declare(faiss
         URL https://github.com/facebookresearch/faiss/archive/refs/tags/v1.14.1.zip
         URL_HASH SHA256=4b1ae7e7a0a46385b4084f0e3945623a15fcf99d793bf44d82aae8e24f11e5f5
+        PATCH_COMMAND
+            "${CMAKE_COMMAND}" -E env
+            "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}"
+            "${GIT_EXECUTABLE}" apply
+            "${CMAKE_CURRENT_SOURCE_DIR}/faiss_optional_openmp.patch"
         ${_fetch_content_declare_args}
     )
     message(STATUS "Configuring faiss...")
@@ -72,6 +77,10 @@ if(FETCH_FAISS)
     set(FAISS_ENABLE_GPU OFF)
     set(FAISS_ENABLE_PYTHON OFF)
     set(FAISS_ENABLE_MKL OFF)
+    set(FAISS_ENABLE_EXTRAS OFF)
+    set(FAISS_ENABLE_OPENMP ${OPENMP_ENABLED})
+    set(FAISS_OPENMP_STUB_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/faiss_omp_stub")
     set(BUILD_TESTING OFF)
     FetchContent_MakeAvailable(faiss)
     # Fix MSVC linker warning LNK4286: faiss headers use FAISS_API which
