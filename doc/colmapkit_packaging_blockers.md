@@ -1,97 +1,101 @@
-# ColmapKit Packaging Blockers
+# ColmapKit Packaging Evidence
 
 Date: 2026-07-15
 
-This matrix tracks blockers found while shaping COLMAP into an Apple-facing
-`ColmapKit.xcframework` for Splats.
+This matrix tracks the current Apple packaging state for COLMAP's narrow
+`ColmapKit` framework surface. The first arm64 iPhoneOS and arm64
+iPhoneSimulator XCFramework is now available for integration testing; runtime
+behavior on an Apple device or in Simulator is not implied by the build proof.
 
 ## Current Artifacts
 
-macOS package artifact:
+macOS package artifact and audits:
 
 ```text
 dist/colmapkit/ColmapKit.xcframework
-```
-
-Generated package audits:
-
-```text
 dist/colmapkit/ColmapKit-otool-L.txt
 dist/colmapkit/ColmapKit-codesign.txt
 dist/colmapkit/ColmapKit-deployment-targets.txt
 dist/colmapkit/ColmapKit-deployment-mismatches.txt
 ```
 
-iOS probe summary:
+iOS package artifact and audits:
 
 ```text
+dist/colmapkit-ios/ColmapKit.xcframework
+dist/colmapkit-ios/framework-audit.txt
+dist/colmapkit-ios/xcframework-info.txt
+dist/colmapkit-ios/smoke/colmapkit-smoke
 dist/colmapkit-ios-probe/summary.md
 ```
 
-Latest vcpkg-backed probe command:
+The iOS artifact, probe logs, audits, and smoke program are generated outputs
+and are intentionally ignored by Git. Reproduce them with:
 
-```text
-COLMAPKIT_IOS_BUILD=OFF COLMAPKIT_IOS_USE_VCPKG=ON COLMAPKIT_IOS_FAIL_ON_BLOCKER=ON COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-ios-ocio bash scripts/probe_colmapkit_ios.sh
+```bash
+COLMAPKIT_IOS_BUILD=ON \
+COLMAPKIT_IOS_USE_VCPKG=ON \
+COLMAPKIT_IOS_FAIL_ON_BLOCKER=ON \
+COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg \
+COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-ios-framework \
+bash scripts/probe_colmapkit_ios.sh
 ```
 
-The intended macOS `ColmapKit.xcframework` is staged through Git LFS when it is
-ready for Splats vendoring. The audit files and iOS probe outputs remain
-generated artifacts and are intentionally ignored by Git.
+The validated run used Xcode 26.5 (17F42), iPhoneOS/iPhoneSimulator SDK 26.5,
+CMake 4.3.2, vcpkg commit `3e169054dfb52ed75fa3159a81282db4b401ae03`,
+and deployment target 18.0. Relevant dependency versions were GKlib 2023-03-27,
+Metis 2022-07-27, OpenColorIO 2.5.2, OpenImageIO 3.1.14.0, and FAISS 1.14.1.
 
-For the runtime split and fallback policy, see [ColmapKit Metal Runtime Decision Memo](colmapkit_metal_runtime.md).
+For the runtime split and fallback policy, see
+[ColmapKit Metal Runtime Decision Memo](colmapkit_metal_runtime.md).
 
-## Blocker Matrix
+## Evidence Matrix
 
 | Category | Status | Evidence | Next Action |
 | --- | --- | --- | --- |
-| macOS framework shape | Proven | The package script creates a macOS arm64 `ColmapKit.xcframework`, signs it, writes audits, and exits zero with the vcpkg macOS 15 triplet plus target-compatible libomp. | Vendor the artifact into Splats and keep the external CLI fallback available. |
-| Swift import | Proven | Swift can import `ColmapKit` and call `ColmapKitVersion` with `-F dist/colmapkit/ColmapKit.xcframework/macos-arm64`; latest result: `COLMAP 4.2.0.dev0 (Commit 2918211e on 2026-07-01 without CUDA)`. | Add the Splats-side wrapper target and adapter. |
-| Runtime dependency closure | Proven for macOS arm64 | `dist/colmapkit/ColmapKit-otool-L.txt` shows only system frameworks/libraries plus `@loader_path/Frameworks/libomp.dylib`; the static vcpkg dependency closure removes the previous 71-dylib Homebrew bundle. | Preserve the vcpkg/static dependency path for release packages. |
-| Deployment target | Proven for macOS 15 | `dist/colmapkit/ColmapKit-deployment-targets.txt` records `ColmapKit` at minOS 15.0 and bundled `libomp.dylib` at minOS 15.0; `ColmapKit-deployment-mismatches.txt` has 0 lines. | Keep the hard mismatch gate enabled by default. |
-| Signing | Proven | `dist/colmapkit/ColmapKit-codesign.txt` records `codesign --verify --deep --strict --verbose=2 dist/colmapkit/ColmapKit.xcframework` as valid and satisfying its designated requirement. | Re-sign after any post-package changes. |
-| OpenMP runtime | Proven for macOS 15 | `scripts/build_libomp_macos.sh` builds LLVM OpenMP from source with `MACOS_DEPLOYMENT_TARGET=15.0`; the package script vendors and rewrites `@rpath/libomp.dylib` to `@loader_path/Frameworks/libomp.dylib`. | Use the source-built runtime, not Homebrew's macOS 26 bottle, for Splats packages. |
-| iOS vcpkg dependency route | Manifest closure proven for device and simulator | The repository overlays preserve the pinned GKlib 2023 and OpenColorIO 2.5.2 registry ports while applying iOS-only portability patches. The fresh configure-only probe reports `All requested installations completed successfully` for both iOS triplets, including GKlib 2023-03-27, Metis 2022-07-27, OpenColorIO 2.5.2, and OpenImageIO 3.1.14.0. | Keep both overlays enabled while COLMAP's post-install configuration blockers are investigated. |
-| OpenColorIO system monitors | Proven for both iOS triplets; macOS behavior preserved | `cmake/vcpkg-ports/opencolorio/ios-system-monitor.diff` routes `TARGET_OS_IPHONE` through OpenColorIO's empty monitor implementation. Direct installs succeed for `arm64-ios-release`, `arm64-ios-simulator-release`, and `arm64-osx-release-macos15`; the iOS archives have no desktop monitor symbols, while the macOS archive still references Core Graphics, ColorSync, and IOKit monitor APIs. | Preserve the explicit platform split when updating the pinned registry port. |
-| iOS device dependencies | Proven through manifest installation | `dist/colmapkit-ios-probe/ios-arm64-configure.log` records successful OpenColorIO 2.5.2 and OpenImageIO 3.1.14.0 builds and completes all requested vcpkg installations before COLMAP configuration fails at OpenGL discovery. | Treat COLMAP's unconditional OpenGL/GLEW discovery as the next device configuration slice. |
-| iOS simulator dependencies | Proven through manifest installation | `dist/colmapkit-ios-probe/ios-simulator-arm64-configure.log` records the same successful OpenColorIO and OpenImageIO builds for `arm64-ios-simulator-release`, then reaches the same OpenGL discovery failure. | Carry the next configuration change through both triplets. |
-| COLMAP iOS configure | Reached; blocked at OpenGL discovery | Although the probe passes `OPENGL_ENABLED=OFF` and `GUI_ENABLED=OFF`, `cmake/FindDependencies.cmake` unconditionally calls `find_package(OpenGL)` and fails with missing `OPENGL_gl_LIBRARY` and `OPENGL_INCLUDE_DIR` for both iOS SDKs. Generation does not complete. | Decide how dependency discovery should honor the disabled OpenGL path; do not start a framework build before both configurations generate successfully. |
-| ColmapKit iOS framework build | Not attempted | The validated probe used `COLMAPKIT_IOS_BUILD=OFF`, and both configurations stopped before generating build files. | After both configure-only slices complete, opt into `COLMAPKIT_IOS_BUILD=ON`. |
-| Metal matching in package | Not runtime-proven | Strict comparison requests Metal but still logs `Requested Metal SIFT descriptor matching, but the Metal backend is unavailable or failed at runtime; falling back to deterministic CPU matching.` (`--force` mode fails by design). | Keep `use_metal_matching=0` for Splats embedded default until end-to-end non-fallback execution is demonstrated. |
-| SiftMetal extraction resources | Unknown | `SIFT_METAL_ENABLED=OFF` in the package script. | If SiftMetal ships, bundle `sift.metallib` inside `ColmapKit.framework` and load it from that bundle. |
+| macOS framework shape | Proven | The existing package path creates and signs a macOS arm64 XCFramework. A fresh arm64 framework regression build after the iOS changes completed with `platform MACOS`, minOS 15.0, normal OpenMP-backed FAISS, and the expected macOS ColorSync/CoreGraphics/IOKit links. | Keep the macOS package validation in place when changing shared CMake or overlays. |
+| iOS vcpkg dependency route | Proven for device and simulator builds | Both iOS triplets install the reduced manifest closure from the checked-in overlays, including GKlib, Metis, OpenColorIO, and OpenImageIO, then compile the full ColmapKit target. | Keep the pinned overlays and both triplet builds in the probe. |
+| OpenGL discovery | Proven disabled for the embedded path | `FindDependencies.cmake` now skips OpenGL/GLEW discovery when GUI, OpenGL, and CUDA paths are disabled, while retaining discovery for GUI/OpenGL and CUDA/SiftGPU builds. Both iOS configurations generate successfully. | Exercise a full GUI desktop build separately when that surface changes. |
+| FAISS without iOS OpenMP | Proven at build/link time | The fetched FAISS build has an explicit OpenMP option. iOS disables it and supplies a serial compatibility header for the small OpenMP API surface used by FAISS; both slices compile and link. macOS keeps FAISS OpenMP enabled. | Treat iOS retrieval/indexing as serial until performance evidence justifies a different backend. |
+| OpenColorIO system monitors | Proven platform split | iOS compiles the empty system-monitor implementation and omits macOS-only ColorSync/CoreGraphics/IOKit link dependencies. A macOS overlay regression build retains those frameworks. | Preserve both the source and CMake platform guards when updating OpenColorIO. |
+| iOS device framework | Proven at build/link time | `ColmapKit.framework/ColmapKit` is a Mach-O arm64 binary with `platform IOS`, minOS 18.0, SDK 26.5, public header, and module map. | Load and call the API from a signed physical-device test app. |
+| iOS simulator framework | Proven at build/link time | `ColmapKit.framework/ColmapKit` is a Mach-O arm64 binary with `platform IOSSIMULATOR`, minOS 18.0, SDK 26.5, public header, and module map. | Run the integration app in an arm64 Simulator. |
+| XCFramework metadata | Proven | `xcodebuild -create-xcframework` exits zero and `xcframework-info.txt` records exactly one `ios-arm64` library and one `ios-arm64-simulator` library with the simulator platform variant. | Integrate the generated XCFramework into the consumer project. |
+| iOS runtime dependency closure | Proven at Mach-O audit level | Both slice binaries link only allowed Apple frameworks/libraries and `@rpath/ColmapKit`; the audit rejects IOKit, host Homebrew/Conda paths, build/vcpkg paths, and macOS-style `.framework/Versions/` load commands. | Repeat the audit for every release artifact. |
+| Swift module import and link | Proven for arm64 Simulator | The generated Swift smoke source imports `ColmapKit`, references `ColmapKitVersion`, and compiles/links into an arm64 iOS Simulator executable against the packaged XCFramework. | Execute the smoke call inside Simulator; compile/link success is not runtime proof. |
+| Exported facade symbols | Proven at binary audit level | Both slices export the public C ABI, including `ColmapKitVersion`, lifecycle functions, and sparse reconstruction entry points. | Add consumer-side lifecycle and cancellation tests. |
+| Metal matching in package | Not runtime-proven | Metal support is compiled, but prior strict runtime comparison fell back to deterministic CPU matching. | Keep CPU matching as the embedded default until no-fallback execution is demonstrated. |
+| SiftMetal extraction resources | Not packaged | `SIFT_METAL_ENABLED=OFF` remains the package default. | If enabled later, bundle `sift.metallib` inside `ColmapKit.framework` and validate bundle-relative loading. |
 
 ## Dependency Policy
 
 Do not treat host Homebrew or Conda libraries as iOS evidence. The iOS probe
-defaults to strict dependency mode and ignores `/opt/homebrew`, `/usr/local`,
-and `/opt/anaconda3` so that any successful iOS configure must come from an
-iOS-compatible dependency prefix or toolchain.
+uses strict dependency mode, ignores `/opt/homebrew`, `/usr/local`, and
+`/opt/anaconda3`, and builds against SDK-targeted vcpkg triplets with
+`VCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON`.
 
-Use `COLMAPKIT_IOS_USE_VCPKG=ON` with `COLMAPKIT_VCPKG_ROOT` pointing at a
-bootstrapped vcpkg checkout to exercise the current iOS route. The probe passes
-`VCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON` so GUI/download dependencies do not
-inflate the iOS proof, and it uses the local `cmake/vcpkg-triplets` overlays to
-pin the iOS 18 deployment target.
+The GKlib overlay retains the registry port's pinned source and desktop path.
+On iOS, filesystem operations use `mkdir(2)`, `opendir(3)`, `readdir(3)`,
+`unlink(2)`, and `rmdir(2)` rather than unavailable shell commands. The
+OpenColorIO overlay uses an empty monitor implementation on iOS and suppresses
+only the iOS link to desktop monitor frameworks; the macOS source and link path
+remain active.
 
-The probe also defaults `VCPKG_OVERLAY_PORTS` to `cmake/vcpkg-ports`. Its GKlib
-overlay retains the registry port's pinned source and existing patches. On iOS,
-`gk_mkpath` uses `mkdir(2)` recursively and `gk_rmpath` uses
-`opendir(3)`, `readdir(3)`, `unlink(2)`, and `rmdir(2)` instead of spawning
-shell commands through unavailable `system(3)`. The original desktop
-implementations remain under the non-iOS preprocessor branch; the overlay also
-builds with the repository's macOS 15 vcpkg triplet.
+FAISS defaults to its upstream OpenMP behavior. When `OPENMP_ENABLED=OFF`, as
+on iOS, the COLMAP fetch supplies a one-thread OpenMP compatibility header and
+disables FAISS OpenMP linking. This is a correctness and portability path, not
+a claim of parallel retrieval performance.
 
-The OpenColorIO overlay mirrors the vcpkg registry's 2.5.2 port and existing
-patches, then adds only `ios-system-monitor.diff`. The patch includes
-`TargetConditionals.h` and treats `TARGET_OS_IPHONE` as having no enumerable
-system monitors, avoiding the macOS-only `IOGraphicsLib.h` path without
-disabling OpenColorIO's color-processing library. The non-iOS Apple branch is
-unchanged. Direct overlay installs were validated for `arm64-ios-release`,
-`arm64-ios-simulator-release`, and `arm64-osx-release-macos15` before the full
-manifest probe was rerun.
+For shippable macOS packages, use static vcpkg dependencies and the
+target-compatible `libomp.dylib` produced by `scripts/build_libomp_macos.sh`.
+The Homebrew libomp bottle is useful only for local compile regression because
+its current deployment target is newer than macOS 15.
 
-For macOS, Homebrew bottles are acceptable only as proof-of-concept build input.
-The shippable package path uses static vcpkg dependencies built with
-`cmake/vcpkg-triplets/arm64-osx-release-macos15.cmake` and a source-built
-`libomp.dylib` from `scripts/build_libomp_macos.sh`. The package script enforces
-the deployment policy by failing by default when any vendored dylib requires a
-newer macOS version than `MACOS_DEPLOYMENT_TARGET`.
+## Still Unproven
+
+- execution in an arm64 iOS Simulator process
+- execution on a signed physical iPhone or iPad
+- representative sparse reconstruction quality and memory behavior on iOS
+- cancellation and lifecycle behavior in a consumer app
+- no-fallback Metal matching or SiftMetal extraction on iOS
+- App Store archive, signing, submission, and review acceptance
