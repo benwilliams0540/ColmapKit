@@ -22,3 +22,15 @@ diff --git a/src/OpenColorIO/SystemMonitor.cpp b/src/OpenColorIO/SystemMonitor.c
  
  namespace OCIO_NAMESPACE
  {
+diff --git a/src/OpenColorIO/CMakeLists.txt b/src/OpenColorIO/CMakeLists.txt
+--- a/src/OpenColorIO/CMakeLists.txt
++++ b/src/OpenColorIO/CMakeLists.txt
+@@ -332,7 +332,7 @@ if(OCIO_USE_SIMD AND OCIO_USE_SSE2NEON AND COMPILER_SUPPORTS_SSE_WITH_SSE2NEON)
+     target_link_libraries(OpenColorIO PRIVATE $<BUILD_INTERFACE:sse2neon>)
+ endif()
+ 
+-if(APPLE)
++if(APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     target_link_libraries(OpenColorIO
+         PRIVATE
+             "-framework ColorSync"
