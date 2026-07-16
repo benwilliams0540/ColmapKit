@@ -52,8 +52,8 @@ def parse_args() -> argparse.Namespace:
             "compare database and sparse reconstruction metrics."
         )
     )
-    parser.add_argument("--colmap-bin", type=Path, required=True)
-    parser.add_argument("--colmapkit-bin", type=Path, required=True)
+    parser.add_argument("--colmap-bin", type=Path)
+    parser.add_argument("--colmapkit-bin", type=Path)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--image-dir", type=Path)
     parser.add_argument("--image-list-path", type=Path)
@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
         "--generate-synthetic-fixture",
         action="store_true",
         help="Generate a deterministic 8-image fixture in the run directory.",
+    )
+    parser.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="Generate the requested fixture without running either reconstruction pipeline.",
     )
     parser.add_argument("--fixture-seed", type=int, default=4)
     parser.add_argument("--fixture-image-count", type=int, default=8)
@@ -98,6 +103,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def check_args(args: argparse.Namespace) -> None:
+    if args.generate_only:
+        if not args.generate_synthetic_fixture:
+            raise SystemExit("--generate-only requires --generate-synthetic-fixture.")
+        return
+    if args.colmap_bin is None:
+        raise SystemExit("Pass --colmap-bin unless --generate-only is used.")
+    if args.colmapkit_bin is None:
+        raise SystemExit("Pass --colmapkit-bin unless --generate-only is used.")
     if not args.colmap_bin.exists():
         raise SystemExit(f"Missing COLMAP binary: {args.colmap_bin}")
     if not args.colmapkit_bin.exists():
@@ -702,6 +715,10 @@ def main() -> None:
     else:
         assert args.image_dir is not None
         image_dir = args.image_dir
+
+    if args.generate_only:
+        print(image_dir)
+        return
 
     cli = run_cli_pipeline(args, image_dir)
     colmapkit = run_colmapkit_pipeline(args, image_dir)
