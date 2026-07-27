@@ -61,6 +61,11 @@ typedef enum ColmapKitMatcherKind {
   COLMAPKIT_MATCHER_SPATIAL = 2
 } ColmapKitMatcherKind;
 
+typedef enum ColmapKitModelOutputType {
+  COLMAPKIT_MODEL_OUTPUT_TYPE_BIN = 0,
+  COLMAPKIT_MODEL_OUTPUT_TYPE_TXT = 1
+} ColmapKitModelOutputType;
+
 typedef enum ColmapKitProgressStage {
   COLMAPKIT_PROGRESS_STAGE_PREPARING = 0,
   COLMAPKIT_PROGRESS_STAGE_FEATURE_EXTRACTION = 1,
@@ -124,6 +129,70 @@ typedef struct ColmapKitSparseReconstructionResult {
   char message[COLMAPKIT_MESSAGE_CAPACITY];
 } ColmapKitSparseReconstructionResult;
 
+typedef struct ColmapKitPointFilteringConfig {
+  size_t struct_size;
+  const char* input_path;
+  const char* output_path;
+  int min_track_len;
+  double max_reproj_error;
+  double min_tri_angle;
+} ColmapKitPointFilteringConfig;
+
+typedef struct ColmapKitPointFilteringResult {
+  size_t struct_size;
+  ColmapKitStatus status;
+  size_t input_points;
+  size_t output_points;
+  size_t input_registered_images;
+  size_t output_registered_images;
+  size_t filtered_points;
+  size_t filtered_observations;
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitPointFilteringResult;
+
+typedef struct ColmapKitModelCroppingConfig {
+  size_t struct_size;
+  const char* input_path;
+  const char* output_path;
+  double min_x;
+  double min_y;
+  double min_z;
+  double max_x;
+  double max_y;
+  double max_z;
+} ColmapKitModelCroppingConfig;
+
+typedef struct ColmapKitModelCroppingResult {
+  size_t struct_size;
+  ColmapKitStatus status;
+  size_t input_points;
+  size_t output_points;
+  size_t input_registered_images;
+  size_t output_registered_images;
+  size_t removed_points;
+  size_t removed_registered_images;
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitModelCroppingResult;
+
+typedef struct ColmapKitModelConversionConfig {
+  size_t struct_size;
+  const char* input_path;
+  const char* output_path;
+  ColmapKitModelOutputType output_type;
+} ColmapKitModelConversionConfig;
+
+typedef struct ColmapKitModelConversionResult {
+  size_t struct_size;
+  ColmapKitStatus status;
+  size_t input_points;
+  size_t output_points;
+  size_t input_registered_images;
+  size_t output_registered_images;
+  ColmapKitModelOutputType output_type;
+  size_t files_written;
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitModelConversionResult;
+
 typedef struct ColmapKitSparseReconstructionJob
     ColmapKitSparseReconstructionJob;
 
@@ -140,15 +209,27 @@ COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartSparseReconstruction(
     const ColmapKitSparseReconstructionConfig* config,
     ColmapKitSparseReconstructionJob** job);
 
-COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelSparseReconstruction(
-    ColmapKitSparseReconstructionJob* job);
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitCancelSparseReconstruction(ColmapKitSparseReconstructionJob* job);
 
-COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitSparseReconstruction(
-    ColmapKitSparseReconstructionJob* job,
-    ColmapKitSparseReconstructionResult* result);
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitWaitSparseReconstruction(ColmapKitSparseReconstructionJob* job,
+                                  ColmapKitSparseReconstructionResult* result);
 
 COLMAPKIT_EXPORT void ColmapKitReleaseSparseReconstructionJob(
     ColmapKitSparseReconstructionJob* job);
+
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitRunPointFiltering(const ColmapKitPointFilteringConfig* config,
+                           ColmapKitPointFilteringResult* result);
+
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitRunModelCropping(const ColmapKitModelCroppingConfig* config,
+                          ColmapKitModelCroppingResult* result);
+
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitRunModelConversion(const ColmapKitModelConversionConfig* config,
+                            ColmapKitModelConversionResult* result);
 
 #ifdef __cplusplus
 }
