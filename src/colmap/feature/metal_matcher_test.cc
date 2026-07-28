@@ -28,6 +28,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "colmap/feature/metal_matcher.h"
+
 #include "colmap/feature/sift.h"
 
 #include <array>
@@ -195,16 +196,10 @@ TEST(MetalSiftDescriptorMatcher, ProducesQueryOrderedMatches) {
 }
 
 TEST(MetalSiftDescriptorMatcher, MatchesExistingSiftBruteForceMatcher) {
-  const FeatureDescriptors query =
-      MakeSparseSiftDescriptors({{0, 1, 2, 3},
-                                 {16, 17, 18, 19},
-                                 {32, 33, 34, 35},
-                                 {48, 49, 50, 51}});
-  const FeatureDescriptors train =
-      MakeSparseSiftDescriptors({{32, 33, 34, 35},
-                                 {0, 1, 2, 3},
-                                 {48, 49, 50, 51},
-                                 {16, 17, 18, 19}});
+  const FeatureDescriptors query = MakeSparseSiftDescriptors(
+      {{0, 1, 2, 3}, {16, 17, 18, 19}, {32, 33, 34, 35}, {48, 49, 50, 51}});
+  const FeatureDescriptors train = MakeSparseSiftDescriptors(
+      {{32, 33, 34, 35}, {0, 1, 2, 3}, {48, 49, 50, 51}, {16, 17, 18, 19}});
 
   ExpectEqualMatches(MatchWithSiftBruteForce(query, train, false),
                      MatchWithMetalMatcher(query, train, false));

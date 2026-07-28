@@ -232,9 +232,8 @@ void SetFailure(ColmapKitStatus status,
 }
 
 void SetCancelled(ColmapKitSparseReconstructionResult* result) {
-  SetFailure(COLMAPKIT_STATUS_CANCELLED,
-             "Sparse reconstruction cancelled.",
-             result);
+  SetFailure(
+      COLMAPKIT_STATUS_CANCELLED, "Sparse reconstruction cancelled.", result);
 }
 
 void EmitProgress(const ColmapKitSparseReconstructionConfig& config,

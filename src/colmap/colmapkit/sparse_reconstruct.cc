@@ -184,8 +184,7 @@ int main(int argc, char** argv) {
 
     status = ColmapKitWaitSparseReconstruction(job, &result);
     ColmapKitReleaseSparseReconstructionJob(job);
-    if (cancel_after_first_progress &&
-        status == COLMAPKIT_STATUS_CANCELLED) {
+    if (cancel_after_first_progress && status == COLMAPKIT_STATUS_CANCELLED) {
       std::cout << result.message << '\n';
       return EXIT_SUCCESS;
     }
