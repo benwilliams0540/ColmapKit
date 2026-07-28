@@ -85,3 +85,11 @@ COLMAP_ADD_TEST(
     LINK_LIBS
         colmap_colmapkit
 )
+
+COLMAP_ADD_TEST(
+    NAME sparse_reconstruction_progress_test
+    SRCS
+        sparse_reconstruction_progress_test.cc
+    LINK_LIBS
+        colmap_colmapkit
+)

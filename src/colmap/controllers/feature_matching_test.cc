@@ -35,6 +35,7 @@
 #include "colmap/util/testing.h"
 
 #include <fstream>
+#include <numeric>
 
 #include <gtest/gtest.h>
 
@@ -79,12 +80,21 @@ TEST(CreateExhaustiveFeatureMatcher, Nominal) {
   matching_options.num_threads = 1;
   TwoViewGeometryOptions geometry_options;
 
+  std::vector<size_t> matched_block_sizes;
   auto matcher = CreateExhaustiveFeatureMatcher(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      [&](size_t num_pairs) { matched_block_sizes.push_back(num_pairs); });
   ASSERT_NE(matcher, nullptr);
   matcher->Start();
   matcher->Wait();
 
+  EXPECT_EQ(
+      std::accumulate(
+          matched_block_sizes.begin(), matched_block_sizes.end(), size_t{0}),
+      6);
   EXPECT_EQ(database->ReadAllMatches().size(), 6);
   EXPECT_EQ(database->ReadTwoViewGeometries().size(), 6);
 }
@@ -142,12 +152,21 @@ TEST(CreateSequentialFeatureMatcher, Nominal) {
 
   TwoViewGeometryOptions geometry_options;
 
+  std::vector<size_t> matched_block_sizes;
   auto matcher = CreateSequentialFeatureMatcher(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      [&](size_t num_pairs) { matched_block_sizes.push_back(num_pairs); });
   ASSERT_NE(matcher, nullptr);
   matcher->Start();
   matcher->Wait();
 
+  EXPECT_EQ(
+      std::accumulate(
+          matched_block_sizes.begin(), matched_block_sizes.end(), size_t{0}),
+      7);
   // With 5 images and overlap=2:
   // (0,1), (0,2), (1,2), (1,3), (2,3), (2,4), (3,4)
   EXPECT_EQ(database->ReadAllMatches().size(), 7);
@@ -172,12 +191,21 @@ TEST(CreateSpatialFeatureMatcher, Nominal) {
 
   TwoViewGeometryOptions geometry_options;
 
+  std::vector<size_t> matched_block_sizes;
   auto matcher = CreateSpatialFeatureMatcher(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      [&](size_t num_pairs) { matched_block_sizes.push_back(num_pairs); });
   ASSERT_NE(matcher, nullptr);
   matcher->Start();
   matcher->Wait();
 
+  EXPECT_GT(
+      std::accumulate(
+          matched_block_sizes.begin(), matched_block_sizes.end(), size_t{0}),
+      0);
   EXPECT_GT(database->ReadAllMatches().size(), 0);
   EXPECT_GT(database->ReadTwoViewGeometries().size(), 0);
 }

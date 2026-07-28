@@ -34,6 +34,9 @@
 #include "colmap/util/testing.h"
 
 #include <fstream>
+#include <set>
+#include <tuple>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -73,11 +76,31 @@ TEST(CreateFeatureExtractorController, Nominal) {
   extraction_options.num_threads = kNumImages;
 
   // Create and run the controller
+  std::vector<std::tuple<size_t, size_t, std::string>> progress;
   auto controller = CreateFeatureExtractorController(
-      database_path, reader_options, extraction_options);
+      database_path,
+      reader_options,
+      extraction_options,
+      [&](size_t current, size_t total, const std::string& image_name) {
+        progress.emplace_back(current, total, image_name);
+      });
   ASSERT_NE(controller, nullptr);
+  ASSERT_EQ(progress.size(), 1);
+  EXPECT_EQ(std::get<0>(progress.front()), 0);
+  EXPECT_EQ(std::get<1>(progress.front()), kNumImages);
+  EXPECT_TRUE(std::get<2>(progress.front()).empty());
   controller->Start();
   controller->Wait();
+
+  ASSERT_EQ(progress.size(), kNumImages + 1);
+  std::set<std::string> processed_image_names;
+  for (size_t i = 1; i < progress.size(); ++i) {
+    EXPECT_EQ(std::get<0>(progress[i]), i);
+    EXPECT_EQ(std::get<1>(progress[i]), kNumImages);
+    EXPECT_FALSE(std::get<2>(progress[i]).empty());
+    processed_image_names.insert(std::get<2>(progress[i]));
+  }
+  EXPECT_EQ(processed_image_names, (std::set<std::string>{"0.png", "1.png"}));
 
   // Verify results in database
   auto database = Database::Open(database_path);
