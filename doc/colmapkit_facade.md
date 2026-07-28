@@ -1,6 +1,6 @@
 # ColmapKit Facade Notes
 
-Date: 2026-07-27
+Date: 2026-07-28
 
 `ColmapKit` is the first native-library seam for embedding COLMAP sparse
 reconstruction in Apple apps such as Splats. It is intentionally a narrow C ABI
@@ -54,7 +54,7 @@ The result reports model count, largest model index, registered image count,
 sparse point count, observation count, mean reprojection error, and a fixed-size
 status message.
 
-Progress is callback-based and intentionally coarse for the first pass:
+Progress uses the existing callback ABI and stages:
 
 - preparing
 - feature extraction
@@ -63,6 +63,24 @@ Progress is callback-based and intentionally coarse for the first pass:
 - sparse text export
 - finished
 - failed
+- cancelled
+
+`ColmapKitProgressEvent` is unchanged from the v0.2.0 ABI. Feature extraction
+reports images processed against the known image total and includes the most
+recent image name in `detail`. Sequential and exhaustive matching report image
+pairs processed against an exact pair total. Spatial matching reports a
+monotonic processed-pair count with `total == 0`, because its distance-filtered
+pair total is not known until generation completes. Mapping reports the number
+of unique registered images across retained models against the mapper input
+image count.
+
+Each long stage emits an explicit `0 / total` start event and a final event.
+Intermediate extraction and matching state is collected by their controller
+threads, then emitted by the reconstruction thread at most four times per
+second. Mapping registration events use the same rate limit. Counts are
+monotonic within a stage and reset when the next stage begins. All public
+callback invocations remain on the reconstruction thread; the callback makes no
+UI-thread assumption.
 
 The callback message pointers are valid only during the callback invocation.
 Callers that need to keep messages must copy them.
@@ -189,6 +207,52 @@ database and sparse model metrics:
 - sparse points: 612
 - observations: 2453
 - mean reprojection error: 0.3380671744135806
+
+### Progress emission
+
+The progress path is covered by the controller tests and the C ABI test:
+
+```bash
+ctest --test-dir build-colmapkit-apple-sceneprep/macos/macos-arm64 \
+  --output-on-failure \
+  -R '^(controllers/(feature_extraction_test|feature_matching_test)|colmapkit/sparse_reconstruction_progress_test)$'
+```
+
+The tests verify exact image and pair counts, known exhaustive totals,
+sequential and spatial block accounting, monotonic counts, stage resets,
+same-thread synchronous callbacks, and cancellation during active feature
+extraction.
+
+A deterministic 120-image, 1024 x 768 PGM fixture was also reconstructed with
+CPU SIFT, CPU sequential matching at overlap 10, one thread, and mapper seed
+zero. The before run used the published v0.2.0 XCFramework; the after run used
+this implementation. Both completed with two models, 120 registered images,
+6,587 sparse points, 198,826 observations, and mean reprojection error
+0.472081. Their binary and text sparse-model directories are byte-identical,
+and their SQLite logical dumps have the same SHA-256.
+
+The saved event streams are:
+
+```text
+dist/colmapkit-progress-v0.2.1/tests/progress-before-v0.2.0.log
+dist/colmapkit-progress-v0.2.1/tests/progress-after.log
+```
+
+Measured callback gaps:
+
+```text
+published v0.2.0 overall maximum: 106.691 seconds
+new overall maximum:              15.589 seconds
+new feature-extraction maximum:    0.972 seconds
+new matching maximum:              0.859 seconds
+```
+
+The remaining overall maximum is mapper work between registration callbacks;
+it is not an extraction or matching emission gap. The after stream contains
+121 extraction events ending at 120/120, 118 matching events ending at
+713/713, and 67 mapping events ending at 120/120. A mechanical audit confirms
+monotonic `current`, stable `total`, and a zero reset at each long-stage
+boundary.
 
 ### Post-processing parity
 
