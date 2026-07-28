@@ -577,3 +577,40 @@ Known remaining blockers:
 - The probe stops at Boost, so the rest of the iOS dependency closure remains unproven: Eigen, OpenImageIO, Metis, glog, SQLite, CHOLMOD/SuiteSparse, Ceres, PoseLib, FAISS, and Metal resource behavior.
 - A real iOS dependency prefix/toolchain is needed before `ColmapKit.xcframework` can include device or simulator slices.
 - Host macOS Homebrew dylibs are not acceptable evidence for iOS feasibility.
+
+### 2026-07-15: Testable iOS XCFramework Build
+
+Implemented:
+
+- Added SDK-targeted vcpkg overlays and triplets that carry GKlib, Metis,
+  OpenColorIO, OpenImageIO, and the reduced COLMAP dependency closure through
+  arm64 iPhoneOS and arm64 iPhoneSimulator builds.
+- Made OpenGL/GLEW discovery honor disabled GUI/OpenGL/CUDA paths.
+- Added a serial FAISS compatibility path for platforms where OpenMP is
+  disabled, while retaining normal OpenMP behavior on macOS.
+- Scoped OpenColorIO's system-monitor source and framework linkage away from
+  iOS while preserving the macOS implementation.
+- Extended `scripts/probe_colmapkit_ios.sh` to build both framework slices,
+  package an XCFramework, audit Mach-O metadata and dependencies, and compile
+  and link a Swift Simulator smoke program.
+
+Validated:
+
+- iPhoneOS arm64 ColmapKit configure/build: passed.
+- iPhoneSimulator arm64 ColmapKit configure/build: passed.
+- `xcodebuild -create-xcframework`: passed with exactly device and simulator
+  arm64 slices at minOS 18.0.
+- Framework header/module map, exported C ABI, platform metadata, and dynamic
+  dependency audits: passed for both slices.
+- Swift arm64 Simulator import/link smoke using `ColmapKitVersion`: passed.
+- macOS arm64 ColmapKit regression build: passed with OpenMP enabled and the
+  expected macOS ColorSync/CoreGraphics/IOKit dependency path preserved.
+
+Known remaining runtime gates:
+
+- Execute the smoke call inside an arm64 Simulator process.
+- Load the XCFramework from a signed physical iPhone/iPad test app.
+- Validate representative reconstruction quality, memory, cancellation, and
+  lifecycle behavior on iOS.
+- Prove no-fallback Metal matching before changing the embedded CPU default.
+- Validate archive signing and App Store distribution separately.

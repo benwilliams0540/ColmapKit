@@ -44,10 +44,11 @@ if(NOT TARGET SQLite3::SQLite3 AND TARGET SQLite::SQLite3)
     add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
 endif()
 
-set(OpenGL_GL_PREFERENCE GLVND)
-find_package(OpenGL ${COLMAP_FIND_TYPE})
-
-find_package(Glew ${COLMAP_FIND_TYPE})
+if((OPENGL_ENABLED AND GUI_ENABLED) OR CUDA_ENABLED)
+    set(OpenGL_GL_PREFERENCE GLVND)
+    find_package(OpenGL ${COLMAP_FIND_TYPE})
+    find_package(Glew ${COLMAP_FIND_TYPE})
+endif()
 
 find_package(Git)
 

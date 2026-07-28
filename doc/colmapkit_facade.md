@@ -330,9 +330,14 @@ dist/colmapkit/ColmapKit.xcframework: satisfies its Designated Requirement
 
 ## iOS Probe Evidence
 
-Validated probe command:
+Validated build and package command:
 
 ```bash
+COLMAPKIT_IOS_BUILD=ON \
+COLMAPKIT_IOS_USE_VCPKG=ON \
+COLMAPKIT_IOS_FAIL_ON_BLOCKER=ON \
+COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg \
+COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-ios-framework \
 bash scripts/probe_colmapkit_ios.sh
 ```
 
@@ -341,7 +346,13 @@ This writes:
 ```text
 dist/colmapkit-ios-probe/summary.md
 dist/colmapkit-ios-probe/ios-arm64-configure.log
+dist/colmapkit-ios-probe/ios-arm64-build.log
 dist/colmapkit-ios-probe/ios-simulator-arm64-configure.log
+dist/colmapkit-ios-probe/ios-simulator-arm64-build.log
+dist/colmapkit-ios/ColmapKit.xcframework
+dist/colmapkit-ios/framework-audit.txt
+dist/colmapkit-ios/xcframework-info.txt
+dist/colmapkit-ios/smoke/colmapkit-smoke
 ```
 
 The probe intentionally defaults to strict dependency mode, which ignores local
@@ -351,18 +362,13 @@ links host macOS libraries.
 
 Current result:
 
-- iOS device slice: configure fails.
-- iOS simulator slice: configure fails.
-- First blocker for both slices: no iOS-compatible Boost CMake package is
-  available to the probe.
+- arm64 iPhoneOS slice: configure, compile, and link pass.
+- arm64 iPhoneSimulator slice: configure, compile, and link pass.
+- the XCFramework contains exactly those two slices with minOS 18.0.
+- both Mach-O dependency audits reject host/macOS-only paths and frameworks.
+- a generated arm64 Simulator Swift program imports the module, references
+  `ColmapKitVersion`, and links successfully against the XCFramework.
 
-Representative error:
-
-```text
-Could not find a package configuration file provided by "Boost"
-```
-
-This probe stops at Boost, so later dependencies such as Eigen, OpenImageIO,
-Metis, glog, SQLite, CHOLMOD/SuiteSparse, Ceres, and any iOS-specific Metal
-resource behavior remain unproven until an iOS dependency prefix/toolchain is
-provided.
+This proves framework build form, module import, and link closure. Simulator
+execution, physical-device execution, representative reconstruction, and
+no-fallback Metal execution remain separate runtime gates.

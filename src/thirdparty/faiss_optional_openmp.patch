@@ -1,0 +1,48 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 87698e6..47965a8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -73,6 +73,8 @@ option(FAISS_ENABLE_PYTHON "Build Python extension." ON)
+ option(FAISS_ENABLE_C_API "Build C API." OFF)
+ option(FAISS_ENABLE_EXTRAS "Build extras like benchmarks and demos" ON)
+ option(FAISS_USE_LTO "Enable Link-Time optimization" OFF)
++option(FAISS_ENABLE_OPENMP "Enable OpenMP parallelism." ON)
++set(FAISS_OPENMP_STUB_INCLUDE_DIR "" CACHE PATH "Serial OpenMP compatibility include directory")
+ option(FAISS_ENABLE_SVS "Enable SVS (Intel(R) Scalable Vector Search) integration." OFF)
+ set(FAISS_SVS_RUNTIME_VERSION "v0" CACHE STRING "Version of the SVS runtime API to use")
+ set_property(CACHE FAISS_SVS_RUNTIME_VERSION PROPERTY STRINGS "v0")
+diff --git a/faiss/CMakeLists.txt b/faiss/CMakeLists.txt
+index 93ad5cf..4656db8 100644
+--- a/faiss/CMakeLists.txt
++++ b/faiss/CMakeLists.txt
+@@ -539,8 +539,23 @@ endif()
+-find_package(OpenMP REQUIRED)
+-target_link_libraries(faiss PRIVATE OpenMP::OpenMP_CXX)
+-target_link_libraries(faiss_avx2 PRIVATE OpenMP::OpenMP_CXX)
+-target_link_libraries(faiss_avx512 PRIVATE OpenMP::OpenMP_CXX)
+-target_link_libraries(faiss_avx512_spr PRIVATE OpenMP::OpenMP_CXX)
+-target_link_libraries(faiss_sve PRIVATE OpenMP::OpenMP_CXX)
++set(FAISS_CPU_TARGETS
++  faiss
++  faiss_avx2
++  faiss_avx512
++  faiss_avx512_spr
++  faiss_sve
++)
++if(FAISS_ENABLE_OPENMP)
++  find_package(OpenMP REQUIRED)
++  foreach(FAISS_CPU_TARGET IN LISTS FAISS_CPU_TARGETS)
++    target_link_libraries(${FAISS_CPU_TARGET} PRIVATE OpenMP::OpenMP_CXX)
++  endforeach()
++else()
++  if(NOT FAISS_OPENMP_STUB_INCLUDE_DIR)
++    message(FATAL_ERROR "FAISS_OPENMP_STUB_INCLUDE_DIR is required when OpenMP is disabled")
++  endif()
++  foreach(FAISS_CPU_TARGET IN LISTS FAISS_CPU_TARGETS)
++    target_include_directories(${FAISS_CPU_TARGET} PUBLIC
++      $<BUILD_INTERFACE:${FAISS_OPENMP_STUB_INCLUDE_DIR}>)
++  endforeach()
++endif()
+-
++
+ if(FAISS_ENABLE_MKL)
