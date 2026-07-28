@@ -1,44 +1,32 @@
 # ColmapKit Packaging Evidence
 
-Date: 2026-07-15
+Date: 2026-07-27
 
 This matrix tracks the current Apple packaging state for COLMAP's narrow
-`ColmapKit` framework surface. The first arm64 iPhoneOS and arm64
-iPhoneSimulator XCFramework is now available for integration testing; runtime
-behavior on an Apple device or in Simulator is not implied by the build proof.
+`ColmapKit` framework surface. The combined macOS arm64, iPhoneOS arm64, and
+iPhoneSimulator arm64 XCFramework now contains the sparse-model filtering,
+cropping, and conversion ABI required by Splats Scene Prep.
 
 ## Current Artifacts
 
-macOS package artifact and audits:
+Combined Apple package artifact and audits:
 
 ```text
-dist/colmapkit/ColmapKit.xcframework
-dist/colmapkit/ColmapKit-otool-L.txt
-dist/colmapkit/ColmapKit-codesign.txt
-dist/colmapkit/ColmapKit-deployment-targets.txt
-dist/colmapkit/ColmapKit-deployment-mismatches.txt
-```
-
-iOS package artifact and audits:
-
-```text
-dist/colmapkit-ios/ColmapKit.xcframework
-dist/colmapkit-ios/framework-audit.txt
-dist/colmapkit-ios/xcframework-info.txt
-dist/colmapkit-ios/smoke/colmapkit-smoke
-dist/colmapkit-ios-probe/summary.md
+dist/colmapkit-apple-sceneprep/ColmapKit.xcframework
+dist/colmapkit-apple-sceneprep/ColmapKit.xcframework.zip
+dist/colmapkit-apple-sceneprep/artifact-summary.txt
+dist/colmapkit-apple-sceneprep/audits/
+dist/colmapkit-apple-sceneprep/runtime-simulator/
 ```
 
 The iOS artifact, probe logs, audits, and smoke program are generated outputs
 and are intentionally ignored by Git. Reproduce them with:
 
 ```bash
-COLMAPKIT_IOS_BUILD=ON \
-COLMAPKIT_IOS_USE_VCPKG=ON \
-COLMAPKIT_IOS_FAIL_ON_BLOCKER=ON \
-COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg \
-COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-ios-framework \
-bash scripts/probe_colmapkit_ios.sh
+COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg-sceneprep-20260727 \
+X_VCPKG_REGISTRIES_CACHE="$HOME/.cache/vcpkg/registries" \
+VCPKG_DEFAULT_BINARY_CACHE="$HOME/.cache/vcpkg/archives" \
+bash scripts/build_colmapkit_apple_xcframework.sh
 ```
 
 The validated run used Xcode 26.5 (17F42), iPhoneOS/iPhoneSimulator SDK 26.5,
@@ -58,12 +46,13 @@ For the runtime split and fallback policy, see
 | OpenGL discovery | Proven disabled for the embedded path | `FindDependencies.cmake` now skips OpenGL/GLEW discovery when GUI, OpenGL, and CUDA paths are disabled, while retaining discovery for GUI/OpenGL and CUDA/SiftGPU builds. Both iOS configurations generate successfully. | Exercise a full GUI desktop build separately when that surface changes. |
 | FAISS without iOS OpenMP | Proven at build/link time | The fetched FAISS build has an explicit OpenMP option. iOS disables it and supplies a serial compatibility header for the small OpenMP API surface used by FAISS; both slices compile and link. macOS keeps FAISS OpenMP enabled. | Treat iOS retrieval/indexing as serial until performance evidence justifies a different backend. |
 | OpenColorIO system monitors | Proven platform split | iOS compiles the empty system-monitor implementation and omits macOS-only ColorSync/CoreGraphics/IOKit link dependencies. A macOS overlay regression build retains those frameworks. | Preserve both the source and CMake platform guards when updating OpenColorIO. |
-| iOS device framework | Proven at build/link time | `ColmapKit.framework/ColmapKit` is a Mach-O arm64 binary with `platform IOS`, minOS 18.0, SDK 26.5, public header, and module map. | Load and call the API from a signed physical-device test app. |
-| iOS simulator framework | Proven at build/link time | `ColmapKit.framework/ColmapKit` is a Mach-O arm64 binary with `platform IOSSIMULATOR`, minOS 18.0, SDK 26.5, public header, and module map. | Run the integration app in an arm64 Simulator. |
-| XCFramework metadata | Proven | `xcodebuild -create-xcframework` exits zero and `xcframework-info.txt` records exactly one `ios-arm64` library and one `ios-arm64-simulator` library with the simulator platform variant. | Integrate the generated XCFramework into the consumer project. |
+| iOS device framework | Proven at build/link/sign/install time | The packaged binary is Mach-O arm64 with `platform IOS`, minOS 18.0, SDK 26.5, public header, and module map. A Swift client referencing all four app-facing operations compiled, linked, developer-signed, and installed on an M1 iPad. Launch was denied because the iPad was locked, and the temporary app was removed. | Rerun the same harness with the device unlocked. |
+| iOS simulator framework | Proven at runtime | The packaged binary is Mach-O arm64 with `platform IOSSIMULATOR`, minOS 18.0, SDK 26.5, public header, and module map. The deterministic eight-image runtime harness passed reconstruction, filtering, cropping, TXT conversion, readback, input immutability, invalid-input, and cancellation checks. | Keep the runtime harness in every Scene Prep release audit. |
+| XCFramework metadata | Proven | `xcodebuild -create-xcframework` exits zero and `Info.plist` records exactly `macos-arm64`, `ios-arm64`, and `ios-arm64-simulator`, with the correct Simulator variant. | Preserve this slice matrix in published replacements. |
 | iOS runtime dependency closure | Proven at Mach-O audit level | Both slice binaries link only allowed Apple frameworks/libraries and `@rpath/ColmapKit`; the audit rejects IOKit, host Homebrew/Conda paths, build/vcpkg paths, and macOS-style `.framework/Versions/` load commands. | Repeat the audit for every release artifact. |
-| Swift module import and link | Proven for arm64 Simulator | The generated Swift smoke source imports `ColmapKit`, references `ColmapKitVersion`, and compiles/links into an arm64 iOS Simulator executable against the packaged XCFramework. | Execute the smoke call inside Simulator; compile/link success is not runtime proof. |
-| Exported facade symbols | Proven at binary audit level | Both slices export the public C ABI, including `ColmapKitVersion`, lifecycle functions, and sparse reconstruction entry points. | Add consumer-side lifecycle and cancellation tests. |
+| Swift module import and link | Proven for all packaged platforms | Generated Swift clients import `ColmapKit`, reference sparse reconstruction plus filtering, cropping, and conversion, and compile/link for macOS arm64, generic iPhoneOS arm64, and iPhoneSimulator arm64. | Repeat for every published archive. |
+| Exported facade symbols | Proven at binary audit level | All three binaries export identical ColmapKit symbols, including `ColmapKitRunSparseReconstruction`, `ColmapKitRunPointFiltering`, `ColmapKitRunModelCropping`, and `ColmapKitRunModelConversion`. | Reject packaging when any required symbol is missing. |
+| Public header and module map | Proven | Headers and module maps are byte-identical across all slices; each header declares the four app-facing entry points and each module map exposes the `colmapkit.h` umbrella header. | Keep the byte comparison and declaration checks in the packager. |
 | Metal matching in package | Not runtime-proven | Metal support is compiled, but prior strict runtime comparison fell back to deterministic CPU matching. | Keep CPU matching as the embedded default until no-fallback execution is demonstrated. |
 | SiftMetal extraction resources | Not packaged | `SIFT_METAL_ENABLED=OFF` remains the package default. | If enabled later, bundle `sift.metallib` inside `ColmapKit.framework` and validate bundle-relative loading. |
 
@@ -93,9 +82,8 @@ its current deployment target is newer than macOS 15.
 
 ## Still Unproven
 
-- execution in an arm64 iOS Simulator process
 - execution on a signed physical iPhone or iPad
 - representative sparse reconstruction quality and memory behavior on iOS
-- cancellation and lifecycle behavior in a consumer app
+- background/relaunch lifecycle behavior in a consumer app
 - no-fallback Metal matching or SiftMetal extraction on iOS
 - App Store archive, signing, submission, and review acceptance

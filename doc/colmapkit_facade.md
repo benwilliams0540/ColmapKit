@@ -224,74 +224,52 @@ CLI command implementations and the C ABI on the same input, then verifies:
 - Invalid paths, inverted bounds, and unsupported conversion types return a
   status plus a human-readable message.
 
-### Framework compile and symbol evidence
+### Apple framework compile, symbol, and runtime evidence
 
-The macOS framework target compiles the new implementation:
+The combined Apple package records its exact source commit in
+`dist/colmapkit-apple-sceneprep/artifact-summary.txt` and is rebuilt with:
 
 ```bash
-cmake --build build-codex-metal --target ColmapKit -j2
+COLMAPKIT_VCPKG_ROOT=/private/tmp/colmap-vcpkg-sceneprep-20260727 \
+X_VCPKG_REGISTRIES_CACHE="$HOME/.cache/vcpkg/registries" \
+VCPKG_DEFAULT_BINARY_CACHE="$HOME/.cache/vcpkg/archives" \
+bash scripts/build_colmapkit_apple_xcframework.sh
 ```
 
-The built macOS slice exports:
+The resulting XCFramework contains exactly:
 
 ```text
+macos-arm64             platform MACOS         minOS 15.0
+ios-arm64               platform IOS           minOS 18.0
+ios-arm64-simulator     platform IOSSIMULATOR  minOS 18.0
+```
+
+Every slice exports the existing reconstruction ABI plus the Scene Prep
+operations:
+
+```text
+_ColmapKitRunSparseReconstruction
 _ColmapKitRunPointFiltering
 _ColmapKitRunModelCropping
 _ColmapKitRunModelConversion
 ```
 
-The current strict iOS probe was also rerun with build mode enabled:
+The packager also verifies that all three public headers and module maps are
+byte-identical, every header declares the four entry points, the module maps
+expose `colmapkit.h`, and Swift imports and links all four operations for macOS,
+generic iPhoneOS, and iPhoneSimulator.
 
-```bash
-COLMAPKIT_IOS_BUILD=ON \
-COLMAPKIT_IOS_FAIL_ON_BLOCKER=ON \
-bash scripts/probe_colmapkit_ios.sh
-```
+The deterministic iOS Simulator harness runs the same packaged Simulator slice
+in-process. Its eight-image fixture produced 603 sparse points, retained 603
+readable points after permissive filtering, cropped the model to a readable
+303-point bounded subset, wrote all five TXT model files, left the binary input
+model byte-identical, and returned `COLMAPKIT_STATUS_INVALID_ARGUMENT` plus
+`input_path must be an existing directory.` for a missing model. Cancellation
+also returned `COLMAPKIT_STATUS_CANCELLED`.
 
-Both `ios-arm64` and `ios-simulator-arm64` currently stop at configure because
-the packaging lane's iOS-compatible Boost/dependency prefix is absent. The new
-source therefore has not yet been compiled into or symbol-audited in an iOS
-framework slice in this checkout. Packaging must restore its iOS dependency
-toolchain, rerun both slice builds, and use `nm -gU` on each resulting framework
-binary to verify the three symbols above before assembling a replacement
-XCFramework.
-
-Validated macOS framework package:
-
-```bash
-COLMAPKIT_CMAKE_TOOLCHAIN_FILE=/private/tmp/colmap-vcpkg/scripts/buildsystems/vcpkg.cmake \
-COLMAPKIT_VCPKG_TARGET_TRIPLET=arm64-osx-release-macos15 \
-COLMAPKIT_VCPKG_INSTALLED_DIR=/private/tmp/colmap-vcpkg-installed-macos15 \
-COLMAPKIT_CMAKE_MAKE_PROGRAM=/private/tmp/colmap-vcpkg/downloads/tools/ninja-1.13.2-osx/ninja \
-COLMAPKIT_IGNORE_PREFIXES='/opt/homebrew;/usr/local' \
-LIBOMP_ROOT="$PWD/dist/libomp-macos15.0" \
-scripts/build_colmapkit_xcframework.sh
-```
-
-This produces:
-
-```text
-dist/colmapkit/ColmapKit.xcframework
-dist/colmapkit/ColmapKit-otool-L.txt
-dist/colmapkit/ColmapKit-codesign.txt
-dist/colmapkit/ColmapKit-deployment-targets.txt
-dist/colmapkit/ColmapKit-deployment-mismatches.txt
-```
-
-Validated Swift import and call:
-
-```bash
-xcrun swift -module-cache-path .build/swift-module-cache \
-  -F dist/colmapkit/ColmapKit.xcframework/macos-arm64 \
-  -framework ColmapKit \
-  -e 'import ColmapKit; print(String(cString: ColmapKitVersion()))'
-```
-
-Result:
-
-```text
-COLMAP 4.2.0.dev0 (Commit 2918211e on 2026-07-01 without CUDA)
-```
+The physical M1 iPad proof reached compile, developer signing, installation,
+and cleanup. Launch was denied because the device was locked, so physical
+execution of these operations remains unverified.
 
 ## Packaging Evidence and Remaining Blockers
 
@@ -367,8 +345,11 @@ Current result:
 - the XCFramework contains exactly those two slices with minOS 18.0.
 - both Mach-O dependency audits reject host/macOS-only paths and frameworks.
 - a generated arm64 Simulator Swift program imports the module, references
-  `ColmapKitVersion`, and links successfully against the XCFramework.
+  sparse reconstruction plus filtering, cropping, and conversion, and links
+  successfully against the XCFramework.
 
-This proves framework build form, module import, and link closure. Simulator
-execution, physical-device execution, representative reconstruction, and
-no-fallback Metal execution remain separate runtime gates.
+This proves framework build form, module import, and link closure. The packaged
+Simulator slice also passes the deterministic reconstruction, post-processing,
+invalid-input, input-immutability, and cancellation runtime harness described
+above. Physical-device execution, representative production workload behavior,
+and no-fallback Metal execution remain separate runtime gates.
