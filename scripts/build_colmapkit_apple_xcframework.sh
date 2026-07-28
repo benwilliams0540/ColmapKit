@@ -23,6 +23,12 @@ COLMAPKIT_IOS_VCPKG_INSTALLED_DIR="${COLMAPKIT_IOS_VCPKG_INSTALLED_DIR:-"$BUILD_
 LIBOMP_ROOT="${LIBOMP_ROOT:-"$BUILD_ROOT/libomp-macos$MACOS_DEPLOYMENT_TARGET"}"
 VCPKG_REGISTRIES_CACHE="${X_VCPKG_REGISTRIES_CACHE:-"$BUILD_ROOT/vcpkg-registries-cache"}"
 VCPKG_BINARY_CACHE="${VCPKG_DEFAULT_BINARY_CACHE:-"$BUILD_ROOT/vcpkg-binary-cache"}"
+REQUIRED_ENTRY_POINTS=(
+  ColmapKitRunSparseReconstruction
+  ColmapKitRunPointFiltering
+  ColmapKitRunModelCropping
+  ColmapKitRunModelConversion
+)
 
 if [[ -z "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" && -n "$COLMAPKIT_VCPKG_ROOT" ]]; then
   COLMAPKIT_CMAKE_TOOLCHAIN_FILE="$COLMAPKIT_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
@@ -115,6 +121,21 @@ cmp "$MACOS_HEADER" "$IOS_HEADER"
 cmp "$MACOS_HEADER" "$IOS_SIMULATOR_HEADER"
 cmp "$MACOS_MODULEMAP" "$IOS_MODULEMAP"
 cmp "$MACOS_MODULEMAP" "$IOS_SIMULATOR_MODULEMAP"
+for header in "$MACOS_HEADER" "$IOS_HEADER" "$IOS_SIMULATOR_HEADER"; do
+  for entry_point in "${REQUIRED_ENTRY_POINTS[@]}"; do
+    grep -Fq "$entry_point" "$header"
+  done
+done
+for modulemap in "$MACOS_MODULEMAP" "$IOS_MODULEMAP" "$IOS_SIMULATOR_MODULEMAP"; do
+  grep -Fq 'umbrella header "colmapkit.h"' "$modulemap"
+done
+{
+  printf 'Headers are byte-identical across all slices.\n'
+  printf 'Module maps are byte-identical across all slices.\n'
+  printf 'Every public header declares:\n'
+  printf '  %s\n' "${REQUIRED_ENTRY_POINTS[@]}"
+  printf 'Every module map exposes umbrella header "colmapkit.h".\n'
+} > "$AUDIT_ROOT/public-interface.txt"
 
 rm -rf "$XCFRAMEWORK_PATH"
 xcodebuild -create-xcframework \
@@ -186,6 +207,13 @@ audit_framework() {
   fi
 
   xcrun nm -gU "$binary" | awk '$3 ~ /^_ColmapKit/ { print $3 }' | sort > "$AUDIT_ROOT/$label-symbols.txt"
+  local entry_point
+  for entry_point in "${REQUIRED_ENTRY_POINTS[@]}"; do
+    if ! grep -Fxq "_$entry_point" "$AUDIT_ROOT/$label-symbols.txt"; then
+      echo "error: $label is missing exported symbol $entry_point." >&2
+      exit 1
+    fi
+  done
 }
 
 audit_framework macos-arm64 "$XCFRAMEWORK_PATH/macos-arm64/ColmapKit.framework" MACOS "$MACOS_DEPLOYMENT_TARGET"
@@ -195,6 +223,61 @@ audit_framework ios-arm64-simulator "$XCFRAMEWORK_PATH/ios-arm64-simulator/Colma
 cmp "$AUDIT_ROOT/macos-arm64-symbols.txt" "$AUDIT_ROOT/ios-arm64-symbols.txt"
 cmp "$AUDIT_ROOT/macos-arm64-symbols.txt" "$AUDIT_ROOT/ios-arm64-simulator-symbols.txt"
 codesign --verify --deep --strict --verbose=2 "$XCFRAMEWORK_PATH" > "$AUDIT_ROOT/xcframework-codesign.txt" 2>&1
+
+SWIFT_LINK_ROOT="$AUDIT_ROOT/swift-link"
+SWIFT_SOURCE="$SWIFT_LINK_ROOT/main.swift"
+mkdir -p "$SWIFT_LINK_ROOT"
+cat > "$SWIFT_SOURCE" <<'SWIFT'
+import ColmapKit
+
+_ = ColmapKitRunSparseReconstruction
+_ = ColmapKitRunPointFiltering
+_ = ColmapKitRunModelCropping
+_ = ColmapKitRunModelConversion
+precondition(!String(cString: ColmapKitVersion()).isEmpty)
+SWIFT
+
+swift_link_slice() {
+  local label="$1"
+  local sdk_name="$2"
+  local target="$3"
+  local framework_search_path="$4"
+  local output="$SWIFT_LINK_ROOT/$label"
+  local module_cache="$SWIFT_LINK_ROOT/$label-module-cache"
+  local log="$SWIFT_LINK_ROOT/$label.log"
+  local sdk_path
+  sdk_path="$(xcrun --sdk "$sdk_name" --show-sdk-path)"
+  mkdir -p "$module_cache"
+  xcrun --sdk "$sdk_name" swiftc \
+    -module-cache-path "$module_cache" \
+    -Xcc "-fmodules-cache-path=$module_cache" \
+    -sdk "$sdk_path" \
+    -target "$target" \
+    -F "$framework_search_path" \
+    "$SWIFT_SOURCE" \
+    -framework ColmapKit \
+    -o "$output" > "$log" 2>&1
+  {
+    xcrun vtool -show-build "$output"
+    otool -L "$output"
+  } >> "$log" 2>&1
+}
+
+swift_link_slice \
+  macos-arm64 \
+  macosx \
+  "arm64-apple-macos$MACOS_DEPLOYMENT_TARGET" \
+  "$XCFRAMEWORK_PATH/macos-arm64"
+swift_link_slice \
+  ios-arm64 \
+  iphoneos \
+  "arm64-apple-ios$IOS_DEPLOYMENT_TARGET" \
+  "$XCFRAMEWORK_PATH/ios-arm64"
+swift_link_slice \
+  ios-arm64-simulator \
+  iphonesimulator \
+  "arm64-apple-ios$IOS_DEPLOYMENT_TARGET-simulator" \
+  "$XCFRAMEWORK_PATH/ios-arm64-simulator"
 
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$XCFRAMEWORK_PATH" "$ZIP_PATH"

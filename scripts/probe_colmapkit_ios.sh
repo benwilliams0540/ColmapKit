@@ -292,6 +292,9 @@ audit_framework() {
     ColmapKitVersion \
     ColmapKitInitialize \
     ColmapKitRunSparseReconstruction \
+    ColmapKitRunPointFiltering \
+    ColmapKitRunModelCropping \
+    ColmapKitRunModelConversion \
     ColmapKitStartSparseReconstruction \
     ColmapKitCancelSparseReconstruction \
     ColmapKitWaitSparseReconstruction \
@@ -378,6 +381,10 @@ package_xcframework() {
     cat > "$smoke_source" <<'SWIFT'
 import ColmapKit
 
+_ = ColmapKitRunSparseReconstruction
+_ = ColmapKitRunPointFiltering
+_ = ColmapKitRunModelCropping
+_ = ColmapKitRunModelConversion
 let version = String(cString: ColmapKitVersion())
 precondition(!version.isEmpty)
 SWIFT
