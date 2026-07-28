@@ -29,6 +29,28 @@ VCPKG_DEFAULT_BINARY_CACHE="$HOME/.cache/vcpkg/archives" \
 bash scripts/build_colmapkit_apple_xcframework.sh
 ```
 
+## Release Destination
+
+Publish immutable ColmapKit Apple archives as assets on the public
+[`benwilliams0540/ColmapKit` GitHub Releases](https://github.com/benwilliams0540/ColmapKit/releases)
+page. Release tags follow `colmapkit-v<major.minor.patch>`, and the attached
+asset is named `ColmapKit.xcframework.zip`.
+
+The SwiftPM binary-target URL therefore has this form:
+
+```text
+https://github.com/benwilliams0540/ColmapKit/releases/download/colmapkit-v<version>/ColmapKit.xcframework.zip
+```
+
+For every release, record the exact source commit, Xcode version, deployment
+targets, slice matrix, and exported ABI in the release notes. Compute the
+SwiftPM checksum from the local archive, then download the published asset
+without authentication and verify its checksum and archive contents again
+before handing the pin to a consumer.
+
+`artifacts.monroes.space` is no longer used for ColmapKit publication. Do not
+overwrite or republish its historical `0.1.0` archive.
+
 The validated run used Xcode 26.5 (17F42), iPhoneOS/iPhoneSimulator SDK 26.5,
 CMake 4.3.2, vcpkg commit `3e169054dfb52ed75fa3159a81282db4b401ae03`,
 and deployment target 18.0. Relevant dependency versions were GKlib 2023-03-27,
