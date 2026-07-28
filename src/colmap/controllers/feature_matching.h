@@ -34,10 +34,15 @@
 #include "colmap/feature/matcher.h"
 #include "colmap/util/threading.h"
 
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 
 namespace colmap {
+
+using FeatureMatchingProgressCallback =
+    std::function<void(size_t num_pairs_in_block)>;
 
 // Exhaustively match images by processing each block in the exhaustive match
 // matrix in one batch:
@@ -66,7 +71,8 @@ std::unique_ptr<Thread> CreateExhaustiveFeatureMatcher(
     const ExhaustivePairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path);
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback = {});
 
 // Match each image against its nearest neighbors using a vocabulary tree.
 std::unique_ptr<Thread> CreateVocabTreeFeatureMatcher(
@@ -97,7 +103,8 @@ std::unique_ptr<Thread> CreateSequentialFeatureMatcher(
     const SequentialPairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path);
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback = {});
 
 // Match images against spatial nearest neighbors using prior location
 // information, e.g. provided manually or extracted from EXIF.
@@ -105,7 +112,8 @@ std::unique_ptr<Thread> CreateSpatialFeatureMatcher(
     const SpatialPairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path);
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback = {});
 
 // Match transitive image pairs in a database with existing feature matches.
 // This matcher transitively closes loops/triplets. For example, if image pairs

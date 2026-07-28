@@ -43,17 +43,22 @@
 #include "colmap/util/oiio_utils.h"
 #include "colmap/util/version.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 
 namespace {
@@ -67,6 +72,8 @@ constexpr size_t kCurrentResultSize =
 constexpr size_t kMinimumConfigSize =
     offsetof(ColmapKitSparseReconstructionConfig, progress_user_data) +
     sizeof(void*);
+constexpr auto kProgressEmissionInterval = std::chrono::milliseconds(250);
+constexpr auto kThreadPollInterval = std::chrono::milliseconds(25);
 
 std::string CStringOrEmpty(const char* value) {
   return value == nullptr ? std::string() : std::string(value);
@@ -258,6 +265,106 @@ void EmitProgress(const ColmapKitSparseReconstructionConfig& config,
   config.progress_callback(&event, config.progress_user_data);
 }
 
+struct ProgressSnapshot {
+  size_t current = 0;
+  size_t total = 0;
+  std::string detail;
+  uint64_t revision = 0;
+};
+
+class StageProgressState {
+ public:
+  void Set(size_t current, size_t total, const std::string& detail = {}) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_ = current;
+    total_ = total;
+    detail_ = detail;
+    ++revision_;
+  }
+
+  void Advance(size_t amount) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_ += amount;
+    ++revision_;
+  }
+
+  ProgressSnapshot GetSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {current_, total_, detail_, revision_};
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  size_t current_ = 0;
+  size_t total_ = 0;
+  std::string detail_;
+  uint64_t revision_ = 0;
+};
+
+class StageProgressEmitter {
+ public:
+  StageProgressEmitter(const ColmapKitSparseReconstructionConfig& config,
+                       ColmapKitProgressStage stage,
+                       std::string message,
+                       const StageProgressState& state)
+      : config_(config),
+        stage_(stage),
+        message_(std::move(message)),
+        state_(state) {}
+
+  void Start() {
+    const ProgressSnapshot snapshot = state_.GetSnapshot();
+    Emit(snapshot, message_, /*stage_complete=*/false);
+  }
+
+  void EmitPending() {
+    const ProgressSnapshot snapshot = state_.GetSnapshot();
+    if (snapshot.revision == last_emitted_revision_) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_emission_time_ < kProgressEmissionInterval) {
+      return;
+    }
+    Emit(snapshot, message_, /*stage_complete=*/false);
+  }
+
+  void Finish(const std::string& message) {
+    Emit(state_.GetSnapshot(), message, /*stage_complete=*/true);
+  }
+
+ private:
+  void Emit(const ProgressSnapshot& snapshot,
+            const std::string& message,
+            bool stage_complete) {
+    double fraction = -1.0;
+    if (snapshot.total > 0) {
+      fraction = std::min(1.0,
+                          static_cast<double>(snapshot.current) /
+                              static_cast<double>(snapshot.total));
+    } else if (stage_complete) {
+      fraction = 1.0;
+    }
+    EmitProgress(config_,
+                 stage_,
+                 message,
+                 snapshot.detail,
+                 fraction,
+                 snapshot.current,
+                 snapshot.total);
+    last_emitted_revision_ = snapshot.revision;
+    last_emission_time_ = std::chrono::steady_clock::now();
+  }
+
+  const ColmapKitSparseReconstructionConfig& config_;
+  const ColmapKitProgressStage stage_;
+  const std::string message_;
+  const StageProgressState& state_;
+  uint64_t last_emitted_revision_ = 0;
+  std::chrono::steady_clock::time_point last_emission_time_ =
+      std::chrono::steady_clock::time_point::min();
+};
+
 void ValidateConfig(const ColmapKitSparseReconstructionConfig& config) {
   if (config.struct_size != 0 && config.struct_size < kMinimumConfigSize) {
     throw std::invalid_argument("Unsupported ColmapKit config struct size.");
@@ -348,45 +455,97 @@ colmap::FeatureMatchingOptions MakeMatchingOptions(
   return options;
 }
 
+colmap::ExhaustivePairingOptions MakeExhaustivePairingOptions() {
+  colmap::ExhaustivePairingOptions options;
+  if (!options.Check()) {
+    throw std::invalid_argument("Invalid exhaustive matcher options.");
+  }
+  return options;
+}
+
+colmap::SpatialPairingOptions MakeSpatialPairingOptions(
+    const ColmapKitSparseReconstructionConfig& config) {
+  colmap::SpatialPairingOptions options;
+  options.num_threads = config.num_threads == 0 ? -1 : config.num_threads;
+  if (!options.Check()) {
+    throw std::invalid_argument("Invalid spatial matcher options.");
+  }
+  return options;
+}
+
+colmap::SequentialPairingOptions MakeSequentialPairingOptions(
+    const ColmapKitSparseReconstructionConfig& config) {
+  colmap::SequentialPairingOptions options;
+  options.overlap =
+      config.sequential_overlap <= 0 ? 10 : config.sequential_overlap;
+  options.quadratic_overlap = true;
+  options.loop_detection = false;
+  options.num_threads = config.num_threads == 0 ? -1 : config.num_threads;
+  if (!options.Check()) {
+    throw std::invalid_argument("Invalid sequential matcher options.");
+  }
+  return options;
+}
+
+size_t CountGeneratedPairs(colmap::PairGenerator& pair_generator) {
+  size_t total = 0;
+  while (!pair_generator.HasFinished()) {
+    total += pair_generator.Next().size();
+  }
+  return total;
+}
+
+size_t CountMatchingPairs(const ColmapKitSparseReconstructionConfig& config) {
+  const auto database =
+      colmap::Database::Open(PathFromCString(config.database_path));
+  switch (config.matcher) {
+    case COLMAPKIT_MATCHER_EXHAUSTIVE: {
+      const size_t num_images = database->NumImages();
+      return num_images < 2 ? 0 : num_images * (num_images - 1) / 2;
+    }
+    case COLMAPKIT_MATCHER_SPATIAL:
+      return 0;
+    case COLMAPKIT_MATCHER_SEQUENTIAL:
+    default: {
+      colmap::SequentialPairGenerator pair_generator(
+          MakeSequentialPairingOptions(config), database);
+      return CountGeneratedPairs(pair_generator);
+    }
+  }
+}
+
 std::unique_ptr<colmap::Thread> MakeMatcher(
     const ColmapKitSparseReconstructionConfig& config,
-    const colmap::FeatureMatchingOptions& matching_options) {
+    const colmap::FeatureMatchingOptions& matching_options,
+    colmap::FeatureMatchingProgressCallback progress_callback) {
   colmap::TwoViewGeometryOptions geometry_options;
   const auto database_path = PathFromCString(config.database_path);
 
   switch (config.matcher) {
     case COLMAPKIT_MATCHER_EXHAUSTIVE: {
-      colmap::ExhaustivePairingOptions pairing_options;
-      if (!pairing_options.Check()) {
-        throw std::invalid_argument("Invalid exhaustive matcher options.");
-      }
       return colmap::CreateExhaustiveFeatureMatcher(
-          pairing_options, matching_options, geometry_options, database_path);
+          MakeExhaustivePairingOptions(),
+          matching_options,
+          geometry_options,
+          database_path,
+          std::move(progress_callback));
     }
     case COLMAPKIT_MATCHER_SPATIAL: {
-      colmap::SpatialPairingOptions pairing_options;
-      pairing_options.num_threads =
-          config.num_threads == 0 ? -1 : config.num_threads;
-      if (!pairing_options.Check()) {
-        throw std::invalid_argument("Invalid spatial matcher options.");
-      }
       return colmap::CreateSpatialFeatureMatcher(
-          pairing_options, matching_options, geometry_options, database_path);
+          MakeSpatialPairingOptions(config),
+          matching_options,
+          geometry_options,
+          database_path,
+          std::move(progress_callback));
     }
     case COLMAPKIT_MATCHER_SEQUENTIAL:
     default: {
-      colmap::SequentialPairingOptions pairing_options;
-      pairing_options.overlap =
-          config.sequential_overlap <= 0 ? 10 : config.sequential_overlap;
-      pairing_options.quadratic_overlap = true;
-      pairing_options.loop_detection = false;
-      pairing_options.num_threads =
-          config.num_threads == 0 ? -1 : config.num_threads;
-      if (!pairing_options.Check()) {
-        throw std::invalid_argument("Invalid sequential matcher options.");
-      }
       return colmap::CreateSequentialFeatureMatcher(
-          pairing_options, matching_options, geometry_options, database_path);
+          MakeSequentialPairingOptions(config),
+          matching_options,
+          geometry_options,
+          database_path,
+          std::move(progress_callback));
     }
   }
 }
@@ -417,12 +576,20 @@ std::shared_ptr<colmap::IncrementalPipelineOptions> MakeMapperOptions(
 }
 
 void RunThread(colmap::Thread* thread,
-               ColmapKitCancellationContext* cancellation) {
+               ColmapKitCancellationContext* cancellation,
+               const std::function<void()>& poll_progress) {
   ThrowIfCancelled(cancellation);
   ScopedActiveThread active_thread(cancellation, thread);
   thread->Start();
-  if (cancellation != nullptr && cancellation->IsCancellationRequested()) {
-    thread->Stop();
+  while (!thread->IsFinished()) {
+    if (cancellation != nullptr && cancellation->IsCancellationRequested()) {
+      thread->Stop();
+      break;
+    }
+    if (poll_progress) {
+      poll_progress();
+    }
+    std::this_thread::sleep_for(kThreadPollInterval);
   }
   thread->Wait();
   ThrowIfCancelled(cancellation);
@@ -482,6 +649,17 @@ void FillResultMetrics(const colmap::ReconstructionManager& manager,
       reconstruction.ComputeMeanReprojectionError();
 }
 
+size_t UpdateRegisteredImageIds(
+    const colmap::ReconstructionManager& manager,
+    std::unordered_set<colmap::image_t>* registered_image_ids) {
+  for (size_t i = 0; i < manager.Size(); ++i) {
+    for (const colmap::image_t image_id : manager.Get(i)->RegImageIds()) {
+      registered_image_ids->insert(image_id);
+    }
+  }
+  return registered_image_ids->size();
+}
+
 std::string SummaryMessage(const ColmapKitSparseReconstructionResult& result) {
   std::ostringstream stream;
   stream << "Sparse reconstruction complete: " << result.num_models
@@ -522,37 +700,67 @@ ColmapKitStatus RunSparseReconstructionImpl(
   auto extraction_options = MakeExtractionOptions(config);
   auto reader_options = MakeReaderOptions(config, extraction_options);
 
-  EmitProgress(config,
-               COLMAPKIT_PROGRESS_STAGE_FEATURE_EXTRACTION,
-               "Extracting SIFT features");
+  StageProgressState extraction_progress;
   auto feature_extractor = colmap::CreateFeatureExtractorController(
-      database_path, reader_options, extraction_options);
-  RunThread(feature_extractor.get(), cancellation);
+      database_path,
+      reader_options,
+      extraction_options,
+      [&](size_t current, size_t total, const std::string& image_name) {
+        extraction_progress.Set(current, total, image_name);
+      });
+  StageProgressEmitter extraction_emitter(
+      config,
+      COLMAPKIT_PROGRESS_STAGE_FEATURE_EXTRACTION,
+      "Extracting SIFT features",
+      extraction_progress);
+  extraction_emitter.Start();
+  RunThread(feature_extractor.get(), cancellation, [&]() {
+    extraction_emitter.EmitPending();
+  });
+  extraction_emitter.Finish("Feature extraction complete");
   ThrowIfCancelled(cancellation);
 
   auto matching_options = MakeMatchingOptions(config);
-  EmitProgress(
-      config, COLMAPKIT_PROGRESS_STAGE_MATCHING, "Matching image features");
-  auto matcher = MakeMatcher(config, matching_options);
-  RunThread(matcher.get(), cancellation);
+  StageProgressState matching_progress;
+  matching_progress.Set(/*current=*/0, CountMatchingPairs(config));
+  auto matcher = MakeMatcher(config, matching_options, [&](size_t num_pairs) {
+    matching_progress.Advance(num_pairs);
+  });
+  StageProgressEmitter matching_emitter(config,
+                                        COLMAPKIT_PROGRESS_STAGE_MATCHING,
+                                        "Matching image features",
+                                        matching_progress);
+  matching_emitter.Start();
+  RunThread(
+      matcher.get(), cancellation, [&]() { matching_emitter.EmitPending(); });
+  matching_emitter.Finish("Feature matching complete");
   ThrowIfCancelled(cancellation);
 
   auto mapper_options = MakeMapperOptions(config);
   auto reconstruction_manager =
       std::make_shared<colmap::ReconstructionManager>();
-  size_t registered_callback_count = 0;
-
-  EmitProgress(
-      config, COLMAPKIT_PROGRESS_STAGE_MAPPING, "Running incremental mapper");
+  const size_t num_mapping_images =
+      mapper_options->image_names.empty()
+          ? colmap::Database::Open(database_path)->NumImages()
+          : mapper_options->image_names.size();
+  size_t max_registered_images = 0;
+  std::unordered_set<colmap::image_t> registered_image_ids;
+  registered_image_ids.reserve(num_mapping_images);
+  StageProgressState mapping_progress;
+  mapping_progress.Set(/*current=*/0, num_mapping_images);
+  StageProgressEmitter mapping_emitter(config,
+                                       COLMAPKIT_PROGRESS_STAGE_MAPPING,
+                                       "Running incremental mapper",
+                                       mapping_progress);
+  mapping_emitter.Start();
   const auto mapping_callback = [&]() {
-    ++registered_callback_count;
-    EmitProgress(config,
-                 COLMAPKIT_PROGRESS_STAGE_MAPPING,
-                 "Registered image",
-                 {},
-                 -1.0,
-                 registered_callback_count,
-                 0);
+    const size_t registered_images = UpdateRegisteredImageIds(
+        *reconstruction_manager, &registered_image_ids);
+    if (registered_images > max_registered_images) {
+      max_registered_images = registered_images;
+      mapping_progress.Set(max_registered_images, num_mapping_images);
+      mapping_emitter.EmitPending();
+    }
   };
 
   std::function<bool()> check_if_stopped;
@@ -576,6 +784,11 @@ ColmapKitStatus RunSparseReconstructionImpl(
     throw std::runtime_error(
         "Incremental mapper failed to create a sparse model.");
   }
+  max_registered_images = std::max(
+      max_registered_images,
+      UpdateRegisteredImageIds(*reconstruction_manager, &registered_image_ids));
+  mapping_progress.Set(max_registered_images, num_mapping_images);
+  mapping_emitter.Finish("Incremental mapping complete");
 
   reconstruction_manager->Write(output_path);
 

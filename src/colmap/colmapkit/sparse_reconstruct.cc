@@ -5,7 +5,9 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
@@ -87,31 +89,35 @@ struct ProgressState {
   std::mutex mutex;
   std::condition_variable condition;
   bool saw_progress = false;
+  std::chrono::steady_clock::time_point start_time =
+      std::chrono::steady_clock::now();
 };
 
 void ProgressCallback(const ColmapKitProgressEvent* event, void* user_data) {
   if (event == nullptr) {
     return;
   }
+  int64_t elapsed_ms = -1;
   if (user_data != nullptr) {
     auto* state = static_cast<ProgressState*>(user_data);
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - state->start_time)
+                     .count();
     {
       std::lock_guard<std::mutex> lock(state->mutex);
       state->saw_progress = true;
     }
     state->condition.notify_all();
   }
-  std::cout << "[ColmapKit] "
-            << (event->message == nullptr ? "" : event->message);
-  if (event->detail != nullptr) {
-    std::cout << ": " << event->detail;
-  }
-  if (event->total > 0) {
-    std::cout << " (" << event->current << "/" << event->total << ")";
-  } else if (event->current > 0) {
-    std::cout << " (" << event->current << ")";
-  }
-  std::cout << '\n';
+  std::cout << "[ColmapKit progress]"
+            << " elapsed_ms=" << elapsed_ms
+            << " stage=" << static_cast<int>(event->stage)
+            << " fraction=" << event->fraction << " current=" << event->current
+            << " total=" << event->total << " message="
+            << std::quoted(event->message == nullptr ? "" : event->message)
+            << " detail="
+            << std::quoted(event->detail == nullptr ? "" : event->detail)
+            << std::endl;
 }
 
 }  // namespace

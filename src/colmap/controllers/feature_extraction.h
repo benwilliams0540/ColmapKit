@@ -33,15 +33,22 @@
 #include "colmap/feature/extractor.h"
 #include "colmap/util/threading.h"
 
+#include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <string>
 
 namespace colmap {
+
+using FeatureExtractionProgressCallback = std::function<void(
+    size_t current, size_t total, const std::string& image_name)>;
 
 // Reads images from a folder, extracts features, and writes them to database.
 std::unique_ptr<Thread> CreateFeatureExtractorController(
     const std::filesystem::path& database_path,
     const ImageReaderOptions& reader_options,
-    const FeatureExtractionOptions& extraction_options);
+    const FeatureExtractionOptions& extraction_options,
+    FeatureExtractionProgressCallback progress_callback = {});
 
 // Import features from text files. Each image must have a corresponding text
 // file with the same name and an additional ".txt" suffix.

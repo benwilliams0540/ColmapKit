@@ -159,7 +159,8 @@ class FeatureMatcherThread : public Thread {
       const typename PairGeneratorType::PairingOptions& pairing_options,
       const FeatureMatchingOptions& matching_options,
       const TwoViewGeometryOptions& geometry_options,
-      const std::filesystem::path& database_path) {
+      const std::filesystem::path& database_path,
+      FeatureMatchingProgressCallback progress_callback = {}) {
     auto database = Database::Open(database_path);
     auto cache = std::make_shared<FeatureMatcherCache>(
         pairing_options.CacheSize(), database);
@@ -170,7 +171,8 @@ class FeatureMatcherThread : public Thread {
         cache,
         [pairing_options, cache]() {
           return std::make_unique<PairGeneratorType>(pairing_options, cache);
-        });
+        },
+        std::move(progress_callback));
   }
 
   using PairGeneratorFactory = std::function<std::unique_ptr<PairGenerator>()>;
@@ -179,12 +181,14 @@ class FeatureMatcherThread : public Thread {
                        const TwoViewGeometryOptions& geometry_options,
                        std::shared_ptr<Database> database,
                        std::shared_ptr<FeatureMatcherCache> cache,
-                       PairGeneratorFactory pair_generator_factory)
+                       PairGeneratorFactory pair_generator_factory,
+                       FeatureMatchingProgressCallback progress_callback)
       : matching_options_(matching_options),
         geometry_options_(geometry_options),
         database_(std::move(database)),
         cache_(std::move(cache)),
         pair_generator_factory_(std::move(pair_generator_factory)),
+        progress_callback_(std::move(progress_callback)),
         matcher_(matching_options, geometry_options, cache_) {
     THROW_CHECK(matching_options.Check());
     THROW_CHECK(geometry_options.Check());
@@ -214,6 +218,9 @@ class FeatureMatcherThread : public Thread {
       const std::vector<std::pair<image_t, image_t>> image_pairs =
           pair_generator->Next();
       matcher_.Match(image_pairs);
+      if (progress_callback_) {
+        progress_callback_(image_pairs.size());
+      }
       LOG(INFO) << StringPrintf("in %.3fs", timer.ElapsedSeconds());
     }
 
@@ -238,6 +245,7 @@ class FeatureMatcherThread : public Thread {
   const std::shared_ptr<Database> database_;
   const std::shared_ptr<FeatureMatcherCache> cache_;
   const PairGeneratorFactory pair_generator_factory_;
+  const FeatureMatchingProgressCallback progress_callback_;
   FeatureMatcherController matcher_;
 };
 
@@ -330,9 +338,14 @@ std::unique_ptr<Thread> CreateExhaustiveFeatureMatcher(
     const ExhaustivePairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path) {
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback) {
   return FeatureMatcherThread::Create<ExhaustivePairGenerator>(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      std::move(progress_callback));
 }
 
 std::unique_ptr<Thread> CreateVocabTreeFeatureMatcher(
@@ -348,18 +361,28 @@ std::unique_ptr<Thread> CreateSequentialFeatureMatcher(
     const SequentialPairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path) {
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback) {
   return FeatureMatcherThread::Create<SequentialPairGenerator>(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      std::move(progress_callback));
 }
 
 std::unique_ptr<Thread> CreateSpatialFeatureMatcher(
     const SpatialPairingOptions& pairing_options,
     const FeatureMatchingOptions& matching_options,
     const TwoViewGeometryOptions& geometry_options,
-    const std::filesystem::path& database_path) {
+    const std::filesystem::path& database_path,
+    FeatureMatchingProgressCallback progress_callback) {
   return FeatureMatcherThread::Create<SpatialPairGenerator>(
-      pairing_options, matching_options, geometry_options, database_path);
+      pairing_options,
+      matching_options,
+      geometry_options,
+      database_path,
+      std::move(progress_callback));
 }
 
 std::unique_ptr<Thread> CreateTransitiveFeatureMatcher(

@@ -247,11 +247,13 @@ class FeatureWriterThread : public Thread {
   FeatureWriterThread(FeatureExtractorType extractor_type,
                       size_t num_images,
                       Database* database,
-                      JobQueue<ImageData>* input_queue)
+                      JobQueue<ImageData>* input_queue,
+                      FeatureExtractionProgressCallback progress_callback)
       : extractor_type_str_(FeatureExtractorTypeToString(extractor_type)),
         num_images_(num_images),
         database_(database),
-        input_queue_(input_queue) {}
+        input_queue_(input_queue),
+        progress_callback_(std::move(progress_callback)) {}
 
  private:
   void Run() override {
@@ -276,6 +278,10 @@ class FeatureWriterThread : public Thread {
         if (image_data.status != ImageReader::Status::SUCCESS) {
           LOG(WARNING) << image_data.image.Name() << " "
                        << ImageReader::StatusToString(image_data.status);
+          if (progress_callback_) {
+            progress_callback_(
+                image_index, num_images_, image_data.image.Name());
+          }
           continue;
         }
 
@@ -338,6 +344,10 @@ class FeatureWriterThread : public Thread {
           database_->WriteDescriptors(image_data.image.ImageId(),
                                       image_data.descriptors);
         }
+
+        if (progress_callback_) {
+          progress_callback_(image_index, num_images_, image_data.image.Name());
+        }
       } else {
         break;
       }
@@ -348,14 +358,17 @@ class FeatureWriterThread : public Thread {
   const size_t num_images_;
   Database* database_;
   JobQueue<ImageData>* input_queue_;
+  const FeatureExtractionProgressCallback progress_callback_;
 };
 
 // Feature extraction class to extract features for all images in a directory.
 class FeatureExtractorController : public Thread {
  public:
-  FeatureExtractorController(const std::filesystem::path& database_path,
-                             const ImageReaderOptions& reader_options,
-                             const FeatureExtractionOptions& extraction_options)
+  FeatureExtractorController(
+      const std::filesystem::path& database_path,
+      const ImageReaderOptions& reader_options,
+      const FeatureExtractionOptions& extraction_options,
+      FeatureExtractionProgressCallback progress_callback)
       : reader_options_(reader_options),
         extraction_options_(extraction_options),
         database_(Database::Open(database_path)),
@@ -500,10 +513,17 @@ class FeatureExtractorController : public Thread {
       }
     }
 
-    writer_ = std::make_unique<FeatureWriterThread>(extraction_options_.type,
-                                                    image_reader_.NumImages(),
-                                                    database_.get(),
-                                                    writer_queue_.get());
+    if (progress_callback) {
+      progress_callback(/*current=*/0,
+                        image_reader_.NumImages(),
+                        /*image_name=*/{});
+    }
+    writer_ =
+        std::make_unique<FeatureWriterThread>(extraction_options_.type,
+                                              image_reader_.NumImages(),
+                                              database_.get(),
+                                              writer_queue_.get(),
+                                              std::move(progress_callback));
   }
 
  private:
@@ -693,9 +713,13 @@ class FeatureImporterController : public Thread {
 std::unique_ptr<Thread> CreateFeatureExtractorController(
     const std::filesystem::path& database_path,
     const ImageReaderOptions& reader_options,
-    const FeatureExtractionOptions& extraction_options) {
+    const FeatureExtractionOptions& extraction_options,
+    FeatureExtractionProgressCallback progress_callback) {
   return std::make_unique<FeatureExtractorController>(
-      database_path, reader_options, extraction_options);
+      database_path,
+      reader_options,
+      extraction_options,
+      std::move(progress_callback));
 }
 
 std::unique_ptr<Thread> CreateFeatureImporterController(
