@@ -24,10 +24,29 @@ LIBOMP_ROOT="${LIBOMP_ROOT:-"$BUILD_ROOT/libomp-macos$MACOS_DEPLOYMENT_TARGET"}"
 VCPKG_REGISTRIES_CACHE="${X_VCPKG_REGISTRIES_CACHE:-"$BUILD_ROOT/vcpkg-registries-cache"}"
 VCPKG_BINARY_CACHE="${VCPKG_DEFAULT_BINARY_CACHE:-"$BUILD_ROOT/vcpkg-binary-cache"}"
 REQUIRED_ENTRY_POINTS=(
+  ColmapKitVersion
+  ColmapKitInitialize
   ColmapKitRunSparseReconstruction
+  ColmapKitStartSparseReconstruction
+  ColmapKitCancelSparseReconstruction
+  ColmapKitWaitSparseReconstruction
+  ColmapKitReleaseSparseReconstructionJob
   ColmapKitRunPointFiltering
   ColmapKitRunModelCropping
   ColmapKitRunModelConversion
+  ColmapKitGetABIVersionV2
+  ColmapKitGetReleaseVersionV2
+  ColmapKitGetEngineBuildIdentityV2
+  ColmapKitRunTrackedPoseReconstructionV2
+  ColmapKitStartTrackedPoseReconstructionV2
+  ColmapKitCancelTrackedPoseReconstructionV2
+  ColmapKitWaitTrackedPoseReconstructionV2
+  ColmapKitReleaseTrackedPoseReconstructionJobV2
+  ColmapKitRunRGBGaussianPriorV2
+  ColmapKitStartRGBGaussianPriorV2
+  ColmapKitCancelRGBGaussianPriorV2
+  ColmapKitWaitRGBGaussianPriorV2
+  ColmapKitReleaseRGBGaussianPriorJobV2
 )
 
 if [[ -z "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" && -n "$COLMAPKIT_VCPKG_ROOT" ]]; then
@@ -231,9 +250,26 @@ cat > "$SWIFT_SOURCE" <<'SWIFT'
 import ColmapKit
 
 _ = ColmapKitRunSparseReconstruction
+_ = ColmapKitStartSparseReconstruction
+_ = ColmapKitCancelSparseReconstruction
+_ = ColmapKitWaitSparseReconstruction
+_ = ColmapKitReleaseSparseReconstructionJob
 _ = ColmapKitRunPointFiltering
 _ = ColmapKitRunModelCropping
 _ = ColmapKitRunModelConversion
+_ = ColmapKitRunTrackedPoseReconstructionV2
+_ = ColmapKitStartTrackedPoseReconstructionV2
+_ = ColmapKitCancelTrackedPoseReconstructionV2
+_ = ColmapKitWaitTrackedPoseReconstructionV2
+_ = ColmapKitReleaseTrackedPoseReconstructionJobV2
+_ = ColmapKitRunRGBGaussianPriorV2
+_ = ColmapKitStartRGBGaussianPriorV2
+_ = ColmapKitCancelRGBGaussianPriorV2
+_ = ColmapKitWaitRGBGaussianPriorV2
+_ = ColmapKitReleaseRGBGaussianPriorJobV2
+precondition(ColmapKitGetABIVersionV2() == 2)
+precondition(!String(cString: ColmapKitGetReleaseVersionV2()).isEmpty)
+precondition(!String(cString: ColmapKitGetEngineBuildIdentityV2()).isEmpty)
 precondition(!String(cString: ColmapKitVersion()).isEmpty)
 SWIFT
 

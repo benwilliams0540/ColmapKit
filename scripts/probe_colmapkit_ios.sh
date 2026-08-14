@@ -298,7 +298,20 @@ audit_framework() {
     ColmapKitStartSparseReconstruction \
     ColmapKitCancelSparseReconstruction \
     ColmapKitWaitSparseReconstruction \
-    ColmapKitReleaseSparseReconstructionJob; do
+    ColmapKitReleaseSparseReconstructionJob \
+    ColmapKitGetABIVersionV2 \
+    ColmapKitGetReleaseVersionV2 \
+    ColmapKitGetEngineBuildIdentityV2 \
+    ColmapKitRunTrackedPoseReconstructionV2 \
+    ColmapKitStartTrackedPoseReconstructionV2 \
+    ColmapKitCancelTrackedPoseReconstructionV2 \
+    ColmapKitWaitTrackedPoseReconstructionV2 \
+    ColmapKitReleaseTrackedPoseReconstructionJobV2 \
+    ColmapKitRunRGBGaussianPriorV2 \
+    ColmapKitStartRGBGaussianPriorV2 \
+    ColmapKitCancelRGBGaussianPriorV2 \
+    ColmapKitWaitRGBGaussianPriorV2 \
+    ColmapKitReleaseRGBGaussianPriorJobV2; do
     if ! grep -Eq "[[:space:]]_${symbol}$" <<< "$symbols_output"; then
       append_summary "- $label audit: failed (missing exported symbol $symbol)"
       return 1
@@ -385,6 +398,19 @@ _ = ColmapKitRunSparseReconstruction
 _ = ColmapKitRunPointFiltering
 _ = ColmapKitRunModelCropping
 _ = ColmapKitRunModelConversion
+_ = ColmapKitRunTrackedPoseReconstructionV2
+_ = ColmapKitStartTrackedPoseReconstructionV2
+_ = ColmapKitCancelTrackedPoseReconstructionV2
+_ = ColmapKitWaitTrackedPoseReconstructionV2
+_ = ColmapKitReleaseTrackedPoseReconstructionJobV2
+_ = ColmapKitRunRGBGaussianPriorV2
+_ = ColmapKitStartRGBGaussianPriorV2
+_ = ColmapKitCancelRGBGaussianPriorV2
+_ = ColmapKitWaitRGBGaussianPriorV2
+_ = ColmapKitReleaseRGBGaussianPriorJobV2
+precondition(ColmapKitGetABIVersionV2() == 2)
+precondition(!String(cString: ColmapKitGetReleaseVersionV2()).isEmpty)
+precondition(!String(cString: ColmapKitGetEngineBuildIdentityV2()).isEmpty)
 let version = String(cString: ColmapKitVersion())
 precondition(!version.isEmpty)
 SWIFT

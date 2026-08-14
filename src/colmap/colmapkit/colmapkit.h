@@ -30,6 +30,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -196,7 +197,179 @@ typedef struct ColmapKitModelConversionResult {
 typedef struct ColmapKitSparseReconstructionJob
     ColmapKitSparseReconstructionJob;
 
+// ColmapKit ABI V2 is strictly additive. Every V2 input and output structure
+// starts with struct_size. Callers must set it to the number of initialized
+// bytes. The library never reads or writes past that boundary.
+#define COLMAPKIT_ABI_VERSION_V2 2u
+#define COLMAPKIT_SHA256_CAPACITY 65
+#define COLMAPKIT_RGB_PRIOR_VARIANT_V2_D 4u
+#define COLMAPKIT_TRACKED_IMAGE_FLAG_V2_INCLUDED 1u
+
+typedef enum ColmapKitTrackingStateV2 {
+  COLMAPKIT_TRACKING_STATE_V2_NORMAL = 0,
+  COLMAPKIT_TRACKING_STATE_V2_LIMITED = 1,
+  COLMAPKIT_TRACKING_STATE_V2_UNAVAILABLE = 2
+} ColmapKitTrackingStateV2;
+
+typedef enum ColmapKitCameraModelV2 {
+  COLMAPKIT_CAMERA_MODEL_V2_PINHOLE = 0,
+  COLMAPKIT_CAMERA_MODEL_V2_SIMPLE_PINHOLE = 1,
+  COLMAPKIT_CAMERA_MODEL_V2_OPENCV = 2
+} ColmapKitCameraModelV2;
+
+typedef enum ColmapKitProgressStageV2 {
+  COLMAPKIT_PROGRESS_STAGE_V2_PREPARING = 0,
+  COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION = 1,
+  COLMAPKIT_PROGRESS_STAGE_V2_MATCHING = 2,
+  COLMAPKIT_PROGRESS_STAGE_V2_TRIANGULATION = 3,
+  COLMAPKIT_PROGRESS_STAGE_V2_BUNDLE_ADJUSTMENT = 4,
+  COLMAPKIT_PROGRESS_STAGE_V2_EXPORT = 5,
+  COLMAPKIT_PROGRESS_STAGE_V2_PRIOR_DENSIFICATION = 6,
+  COLMAPKIT_PROGRESS_STAGE_V2_PRIOR_GEOMETRY = 7,
+  COLMAPKIT_PROGRESS_STAGE_V2_FINISHED = 8,
+  COLMAPKIT_PROGRESS_STAGE_V2_FAILED = 9,
+  COLMAPKIT_PROGRESS_STAGE_V2_CANCELLED = 10
+} ColmapKitProgressStageV2;
+
+typedef struct ColmapKitProgressEventV2 {
+  uint32_t struct_size;
+  uint32_t stage;
+  double fraction;
+  uint64_t current;
+  uint64_t total;
+  double elapsed_seconds;
+  const char* message;
+  const char* detail;
+} ColmapKitProgressEventV2;
+
+typedef void (*ColmapKitProgressCallbackV2)(
+    const ColmapKitProgressEventV2* event, void* user_data);
+
+// One already-filtered RGB frame. V2 currently accepts only NORMAL tracking.
+// world_from_camera is a finite, rigid, column-major ARKit transform in meters.
+typedef struct ColmapKitTrackedImageV2 {
+  uint32_t struct_size;
+  uint32_t camera_model;
+  uint64_t stable_id;
+  uint32_t order_index;
+  uint32_t encoded_width;
+  uint32_t encoded_height;
+  uint32_t num_camera_params;
+  double camera_params[8];
+  double world_from_camera[16];
+  uint32_t tracking_state;
+  int32_t tracking_reason;
+  uint32_t inclusion_flags;
+  uint32_t reserved0;
+  double translation_weight;
+  double rotation_weight;
+  const char* image_path;
+} ColmapKitTrackedImageV2;
+
+typedef struct ColmapKitTrackedPoseConfigV2 {
+  uint32_t struct_size;
+  uint32_t flags;
+  const ColmapKitTrackedImageV2* images;
+  uint32_t num_images;
+  uint32_t max_features_per_image;
+  uint32_t temporal_neighbor_count;
+  uint32_t max_revisit_neighbors_per_image;
+  uint32_t max_image_pairs;
+  uint32_t max_triangulation_passes;
+  uint32_t max_bundle_adjustment_iterations;
+  uint32_t random_seed;
+  uint32_t num_threads;
+  double revisit_min_translation_meters;
+  double revisit_max_translation_meters;
+  double revisit_max_rotation_degrees;
+  double min_triangulation_angle_degrees;
+  double max_reprojection_error_pixels;
+  double max_allowed_scale_drift_ratio;
+  const char* database_path;
+  const char* output_model_path;
+  const char* refined_pose_path;
+  const char* evidence_path;
+  ColmapKitProgressCallbackV2 progress_callback;
+  void* progress_user_data;
+} ColmapKitTrackedPoseConfigV2;
+
+typedef struct ColmapKitTrackedPoseResultV2 {
+  uint32_t struct_size;
+  uint32_t status;
+  uint32_t registered_images;
+  uint32_t matched_pairs;
+  uint64_t sparse_points;
+  uint64_t observations;
+  double initial_mean_reprojection_error;
+  double final_mean_reprojection_error;
+  double max_translation_correction_meters;
+  double max_rotation_correction_degrees;
+  double measured_scale_drift_ratio;
+  double feature_seconds;
+  double matching_seconds;
+  double triangulation_seconds;
+  double bundle_adjustment_seconds;
+  double export_seconds;
+  char refined_pose_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitTrackedPoseResultV2;
+
+typedef struct ColmapKitRGBPriorConfigV2 {
+  uint32_t struct_size;
+  uint32_t flags;
+  const ColmapKitTrackedImageV2* images;
+  uint32_t num_images;
+  uint32_t normal_neighbor_count;
+  uint32_t max_points_per_spatial_cell;
+  uint32_t max_output_gaussians;
+  uint32_t minimum_densification_percent;
+  uint32_t random_seed;
+  double spatial_cell_size_meters;
+  double min_spacing_meters;
+  double max_spacing_meters;
+  double tangent_scale_multiplier;
+  double normal_scale_multiplier;
+  double initial_opacity;
+  const char* database_path;
+  const char* refined_model_path;
+  const char* refined_pose_path;
+  const char* expected_refined_pose_sha256;
+  const char* output_ply_path;
+  const char* evidence_path;
+  ColmapKitProgressCallbackV2 progress_callback;
+  void* progress_user_data;
+} ColmapKitRGBPriorConfigV2;
+
+typedef struct ColmapKitRGBPriorResultV2 {
+  uint32_t struct_size;
+  uint32_t status;
+  uint32_t variant;
+  uint32_t sh_degree;
+  uint64_t sparse_input_points;
+  uint64_t correspondence_candidates;
+  uint64_t rejected_candidates;
+  uint64_t output_gaussians;
+  uint64_t density_capped_points;
+  double median_spacing_meters;
+  double median_anisotropy_ratio;
+  double densification_ratio;
+  double densification_seconds;
+  double geometry_seconds;
+  double export_seconds;
+  char input_pose_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char output_pose_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char output_ply_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitRGBPriorResultV2;
+
+typedef struct ColmapKitTrackedPoseJobV2 ColmapKitTrackedPoseJobV2;
+typedef struct ColmapKitRGBPriorJobV2 ColmapKitRGBPriorJobV2;
+
 COLMAPKIT_EXPORT const char* ColmapKitVersion(void);
+
+COLMAPKIT_EXPORT uint32_t ColmapKitGetABIVersionV2(void);
+COLMAPKIT_EXPORT const char* ColmapKitGetReleaseVersionV2(void);
+COLMAPKIT_EXPORT const char* ColmapKitGetEngineBuildIdentityV2(void);
 
 COLMAPKIT_EXPORT ColmapKitStatus
 ColmapKitInitialize(const char* application_name);
@@ -230,6 +403,30 @@ ColmapKitRunModelCropping(const ColmapKitModelCroppingConfig* config,
 COLMAPKIT_EXPORT ColmapKitStatus
 ColmapKitRunModelConversion(const ColmapKitModelConversionConfig* config,
                             ColmapKitModelConversionResult* result);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitRunTrackedPoseReconstructionV2(
+    const ColmapKitTrackedPoseConfigV2* config,
+    ColmapKitTrackedPoseResultV2* result);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartTrackedPoseReconstructionV2(
+    const ColmapKitTrackedPoseConfigV2* config, ColmapKitTrackedPoseJobV2** job);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelTrackedPoseReconstructionV2(
+    ColmapKitTrackedPoseJobV2* job);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitTrackedPoseReconstructionV2(
+    ColmapKitTrackedPoseJobV2* job, ColmapKitTrackedPoseResultV2* result);
+COLMAPKIT_EXPORT void ColmapKitReleaseTrackedPoseReconstructionJobV2(
+    ColmapKitTrackedPoseJobV2* job);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitRunRGBGaussianPriorV2(
+    const ColmapKitRGBPriorConfigV2* config,
+    ColmapKitRGBPriorResultV2* result);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartRGBGaussianPriorV2(
+    const ColmapKitRGBPriorConfigV2* config, ColmapKitRGBPriorJobV2** job);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelRGBGaussianPriorV2(
+    ColmapKitRGBPriorJobV2* job);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitRGBGaussianPriorV2(
+    ColmapKitRGBPriorJobV2* job, ColmapKitRGBPriorResultV2* result);
+COLMAPKIT_EXPORT void ColmapKitReleaseRGBGaussianPriorJobV2(
+    ColmapKitRGBPriorJobV2* job);
 
 #ifdef __cplusplus
 }

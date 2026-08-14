@@ -1,10 +1,14 @@
 import Darwin
 import Foundation
+import simd
 import UIKit
 @preconcurrency import ColmapKit
 
 private struct RuntimeResult: Codable {
   var version: String
+  var abiVersion: UInt32
+  var releaseVersion: String
+  var engineBuildIdentity: String
   var initializeStatus: UInt32
   var reconstructionStatus: UInt32
   var registeredImages: Int
@@ -29,6 +33,33 @@ private struct RuntimeResult: Codable {
   var cancellationStatus: UInt32
   var cancellationLatencySeconds: Double
   var fixtureImageCount: Int
+  var trackedV2Status: UInt32
+  var trackedV2RegisteredImages: Int
+  var trackedV2SparsePoints: Int
+  var trackedV2NoFallback: Bool
+  var trackedV2CancellationStatus: UInt32
+  var priorV2Status: UInt32
+  var priorV2Variant: UInt32
+  var priorV2SHDegree: UInt32
+  var priorV2OutputGaussians: Int
+  var priorV2DensificationRatio: Double
+  var priorV2PoseUnchanged: Bool
+  var priorV2PLYValidated: Bool
+}
+
+private struct V2RuntimeResult {
+  var trackedStatus: ColmapKitStatus
+  var registeredImages: Int
+  var sparsePoints: Int
+  var noFallback: Bool
+  var cancellationStatus: ColmapKitStatus
+  var priorStatus: ColmapKitStatus
+  var variant: UInt32
+  var shDegree: UInt32
+  var outputGaussians: Int
+  var densificationRatio: Double
+  var poseUnchanged: Bool
+  var plyValidated: Bool
 }
 
 private struct PostprocessingRuntimeResult {
@@ -94,6 +125,12 @@ private enum ColmapKitRuntimeHarness {
     guard !version.isEmpty else {
       throw HarnessError.failed("ColmapKitVersion returned an empty string.")
     }
+    let abiVersion = ColmapKitGetABIVersionV2()
+    let releaseVersion = String(cString: ColmapKitGetReleaseVersionV2())
+    let engineBuildIdentity = String(cString: ColmapKitGetEngineBuildIdentityV2())
+    guard abiVersion == 2, !releaseVersion.isEmpty, !engineBuildIdentity.isEmpty else {
+      throw HarnessError.failed("ColmapKit V2 identity exports are invalid.")
+    }
 
     let initializeStatus = "ColmapKitRuntimeHarness".withCString(ColmapKitInitialize)
     guard isSuccess(initializeStatus) else {
@@ -154,8 +191,16 @@ private enum ColmapKitRuntimeHarness {
       )
     }
 
+    let v2 = try runV2(
+      fixtureURL: fixtureURL,
+      rootURL: runRoot.appendingPathComponent("v2", isDirectory: true)
+    )
+
     return RuntimeResult(
       version: version,
+      abiVersion: abiVersion,
+      releaseVersion: releaseVersion,
+      engineBuildIdentity: engineBuildIdentity,
       initializeStatus: initializeStatus.rawValue,
       reconstructionStatus: reconstruction.result.status.rawValue,
       registeredImages: Int(reconstruction.result.registered_images),
@@ -179,7 +224,227 @@ private enum ColmapKitRuntimeHarness {
       invalidInputMessage: postprocessing.invalidInputMessage,
       cancellationStatus: cancellation.result.status.rawValue,
       cancellationLatencySeconds: cancellation.cancellationLatencySeconds,
-      fixtureImageCount: fixtureImageCount
+      fixtureImageCount: fixtureImageCount,
+      trackedV2Status: v2.trackedStatus.rawValue,
+      trackedV2RegisteredImages: v2.registeredImages,
+      trackedV2SparsePoints: v2.sparsePoints,
+      trackedV2NoFallback: v2.noFallback,
+      trackedV2CancellationStatus: v2.cancellationStatus.rawValue,
+      priorV2Status: v2.priorStatus.rawValue,
+      priorV2Variant: v2.variant,
+      priorV2SHDegree: v2.shDegree,
+      priorV2OutputGaussians: v2.outputGaussians,
+      priorV2DensificationRatio: v2.densificationRatio,
+      priorV2PoseUnchanged: v2.poseUnchanged,
+      priorV2PLYValidated: v2.plyValidated
+    )
+  }
+
+  private static func runV2(fixtureURL: URL, rootURL: URL) throws -> V2RuntimeResult {
+    let fileManager = FileManager.default
+    try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+    let imageURLs = try fileManager.contentsOfDirectory(
+      at: fixtureURL,
+      includingPropertiesForKeys: nil
+    ).filter { $0.pathExtension.lowercased() == "pgm" }.sorted {
+      $0.lastPathComponent < $1.lastPathComponent
+    }
+    guard imageURLs.count == 8 else {
+      throw HarnessError.failed("V2 Simulator fixture must contain exactly eight PGM images.")
+    }
+
+    var allocatedStrings: [UnsafeMutablePointer<CChar>] = []
+    func cString(_ value: String) throws -> UnsafePointer<CChar> {
+      guard let pointer = strdup(value) else {
+        throw HarnessError.failed("Could not allocate C string for \(value).")
+      }
+      allocatedStrings.append(pointer)
+      return UnsafePointer(pointer)
+    }
+    defer { allocatedStrings.forEach { free($0) } }
+
+    var images: [ColmapKitTrackedImageV2] = []
+    for (index, imageURL) in imageURLs.enumerated() {
+      var image = ColmapKitTrackedImageV2()
+      image.struct_size = UInt32(MemoryLayout<ColmapKitTrackedImageV2>.size)
+      image.camera_model = COLMAPKIT_CAMERA_MODEL_V2_SIMPLE_PINHOLE.rawValue
+      image.stable_id = UInt64(1_000 + index)
+      image.order_index = UInt32(index)
+      image.encoded_width = 1_024
+      image.encoded_height = 768
+      image.num_camera_params = 3
+      withUnsafeMutableBytes(of: &image.camera_params) { bytes in
+        let values = bytes.bindMemory(to: Double.self)
+        values[0] = 900
+        values[1] = 512
+        values[2] = 384
+      }
+      let transform = arkitWorldFromCamera(index: index, count: imageURLs.count)
+      withUnsafeMutableBytes(of: &image.world_from_camera) { bytes in
+        let values = bytes.bindMemory(to: Double.self)
+        for offset in transform.indices { values[offset] = transform[offset] }
+      }
+      image.tracking_state = COLMAPKIT_TRACKING_STATE_V2_NORMAL.rawValue
+      image.inclusion_flags = UInt32(COLMAPKIT_TRACKED_IMAGE_FLAG_V2_INCLUDED)
+      image.translation_weight = 1
+      image.rotation_weight = 1
+      image.image_path = try cString(imageURL.path)
+      images.append(image)
+    }
+
+    let databaseURL = rootURL.appendingPathComponent("database.db")
+    let modelURL = rootURL.appendingPathComponent("sparse", isDirectory: true)
+    let poseURL = rootURL.appendingPathComponent("refined-poses.json")
+    let trackedEvidenceURL = rootURL.appendingPathComponent("tracked-evidence.json")
+    var trackedConfig = ColmapKitTrackedPoseConfigV2()
+    trackedConfig.struct_size = UInt32(MemoryLayout<ColmapKitTrackedPoseConfigV2>.size)
+    trackedConfig.num_images = UInt32(images.count)
+    trackedConfig.max_features_per_image = 4_096
+    trackedConfig.temporal_neighbor_count = 3
+    trackedConfig.max_revisit_neighbors_per_image = 2
+    trackedConfig.max_image_pairs = 28
+    trackedConfig.max_triangulation_passes = 2
+    trackedConfig.max_bundle_adjustment_iterations = 40
+    trackedConfig.random_seed = 7
+    trackedConfig.num_threads = 1
+    trackedConfig.revisit_min_translation_meters = 0.1
+    trackedConfig.revisit_max_translation_meters = 2
+    trackedConfig.revisit_max_rotation_degrees = 45
+    trackedConfig.min_triangulation_angle_degrees = 0.1
+    trackedConfig.max_reprojection_error_pixels = 4
+    trackedConfig.max_allowed_scale_drift_ratio = 1e-9
+    trackedConfig.database_path = try cString(databaseURL.path)
+    trackedConfig.output_model_path = try cString(modelURL.path)
+    trackedConfig.refined_pose_path = try cString(poseURL.path)
+    trackedConfig.evidence_path = try cString(trackedEvidenceURL.path)
+
+    var trackedJob: OpaquePointer?
+    let trackedStart = images.withUnsafeBufferPointer { buffer in
+      trackedConfig.images = buffer.baseAddress
+      return ColmapKitStartTrackedPoseReconstructionV2(&trackedConfig, &trackedJob)
+    }
+    guard isSuccess(trackedStart), let trackedJob else {
+      throw HarnessError.failed("V2 tracked start failed with \(trackedStart.rawValue).")
+    }
+    defer { ColmapKitReleaseTrackedPoseReconstructionJobV2(trackedJob) }
+    var trackedResult = ColmapKitTrackedPoseResultV2()
+    trackedResult.struct_size = UInt32(MemoryLayout<ColmapKitTrackedPoseResultV2>.size)
+    let trackedWait = ColmapKitWaitTrackedPoseReconstructionV2(trackedJob, &trackedResult)
+    guard isSuccess(trackedWait),
+          trackedResult.status == COLMAPKIT_STATUS_OK.rawValue,
+          Int(trackedResult.registered_images) == images.count,
+          trackedResult.sparse_points > 0
+    else {
+      throw HarnessError.failed("V2 tracked reconstruction failed: \(message(from: trackedResult))")
+    }
+    let trackedEvidence = try jsonDictionary(at: trackedEvidenceURL)
+    let noFallback = trackedEvidence["route"] as? String == "tracked_pose_bounded_v2"
+      && trackedEvidence["fallback_used"] as? Bool == false
+      && trackedEvidence["arkit_world_frame_preserved"] as? Bool == true
+      && trackedEvidence["arkit_metric_scale_preserved"] as? Bool == true
+    guard noFallback else {
+      throw HarnessError.failed("V2 tracked evidence did not prove the bounded no-fallback route.")
+    }
+
+    let cancellationRoot = rootURL.appendingPathComponent("cancelled", isDirectory: true)
+    try fileManager.createDirectory(at: cancellationRoot, withIntermediateDirectories: true)
+    var cancelConfig = trackedConfig
+    cancelConfig.database_path = try cString(cancellationRoot.appendingPathComponent("database.db").path)
+    cancelConfig.output_model_path = try cString(cancellationRoot.appendingPathComponent("sparse").path)
+    cancelConfig.refined_pose_path = try cString(cancellationRoot.appendingPathComponent("poses.json").path)
+    cancelConfig.evidence_path = try cString(cancellationRoot.appendingPathComponent("evidence.json").path)
+    var cancelJob: OpaquePointer?
+    let cancelStart = images.withUnsafeBufferPointer { buffer in
+      cancelConfig.images = buffer.baseAddress
+      return ColmapKitStartTrackedPoseReconstructionV2(&cancelConfig, &cancelJob)
+    }
+    guard isSuccess(cancelStart), let cancelJob else {
+      throw HarnessError.failed("V2 cancellation job failed to start.")
+    }
+    defer { ColmapKitReleaseTrackedPoseReconstructionJobV2(cancelJob) }
+    guard isSuccess(ColmapKitCancelTrackedPoseReconstructionV2(cancelJob)) else {
+      throw HarnessError.failed("V2 cancellation request failed.")
+    }
+    var cancelResult = ColmapKitTrackedPoseResultV2()
+    cancelResult.struct_size = UInt32(MemoryLayout<ColmapKitTrackedPoseResultV2>.size)
+    let cancelWait = ColmapKitWaitTrackedPoseReconstructionV2(cancelJob, &cancelResult)
+    guard isCancelled(cancelWait), cancelResult.status == COLMAPKIT_STATUS_CANCELLED.rawValue else {
+      throw HarnessError.failed("V2 cancellation did not return CANCELLED.")
+    }
+
+    let poseBefore = try Data(contentsOf: poseURL)
+    let poseSHA = fixedCString(&trackedResult.refined_pose_sha256)
+    let plyURL = rootURL.appendingPathComponent("init.ply")
+    let priorEvidenceURL = rootURL.appendingPathComponent("prior-evidence.json")
+    var priorConfig = ColmapKitRGBPriorConfigV2()
+    priorConfig.struct_size = UInt32(MemoryLayout<ColmapKitRGBPriorConfigV2>.size)
+    priorConfig.num_images = UInt32(images.count)
+    priorConfig.normal_neighbor_count = 12
+    priorConfig.max_points_per_spatial_cell = 96
+    priorConfig.max_output_gaussians = 12_000
+    priorConfig.minimum_densification_percent = 10
+    priorConfig.random_seed = 7
+    priorConfig.spatial_cell_size_meters = 0.08
+    priorConfig.min_spacing_meters = 0.001
+    priorConfig.max_spacing_meters = 0.25
+    priorConfig.tangent_scale_multiplier = 0.8
+    priorConfig.normal_scale_multiplier = 0.2
+    priorConfig.initial_opacity = 0.1
+    priorConfig.database_path = try cString(databaseURL.path)
+    priorConfig.refined_model_path = try cString(modelURL.path)
+    priorConfig.refined_pose_path = try cString(poseURL.path)
+    priorConfig.expected_refined_pose_sha256 = try cString(poseSHA)
+    priorConfig.output_ply_path = try cString(plyURL.path)
+    priorConfig.evidence_path = try cString(priorEvidenceURL.path)
+    var priorResult = ColmapKitRGBPriorResultV2()
+    priorResult.struct_size = UInt32(MemoryLayout<ColmapKitRGBPriorResultV2>.size)
+    let priorStatus = images.withUnsafeBufferPointer { buffer in
+      priorConfig.images = buffer.baseAddress
+      return ColmapKitRunRGBGaussianPriorV2(&priorConfig, &priorResult)
+    }
+    guard isSuccess(priorStatus),
+          priorResult.status == COLMAPKIT_STATUS_OK.rawValue,
+          priorResult.variant == UInt32(COLMAPKIT_RGB_PRIOR_VARIANT_V2_D),
+          priorResult.sh_degree == 0,
+          priorResult.densification_ratio >= 1.1,
+          priorResult.output_gaussians > trackedResult.sparse_points
+    else {
+      throw HarnessError.failed("V2 prior failed: \(message(from: priorResult))")
+    }
+    let poseUnchanged = poseBefore == (try Data(contentsOf: poseURL))
+    guard poseUnchanged else {
+      throw HarnessError.failed("V2 prior modified the frozen pose artifact.")
+    }
+    let priorEvidence = try jsonDictionary(at: priorEvidenceURL)
+    guard priorEvidence["variant"] as? String == "D",
+          priorEvidence["depth_used"] as? Bool == false,
+          priorEvidence["poses_frozen"] as? Bool == true,
+          priorEvidence["input_pose_sha256"] as? String == poseSHA,
+          priorEvidence["output_pose_sha256"] as? String == poseSHA
+    else {
+      throw HarnessError.failed("V2 prior evidence is incomplete.")
+    }
+    let plyValidated = try validateGaussianPLY(
+      at: plyURL,
+      expectedVertices: Int(priorResult.output_gaussians)
+    )
+    guard plyValidated else {
+      throw HarnessError.failed("V2 Gaussian PLY validation failed.")
+    }
+
+    return V2RuntimeResult(
+      trackedStatus: trackedWait,
+      registeredImages: Int(trackedResult.registered_images),
+      sparsePoints: Int(trackedResult.sparse_points),
+      noFallback: noFallback,
+      cancellationStatus: cancelWait,
+      priorStatus: priorStatus,
+      variant: priorResult.variant,
+      shDegree: priorResult.sh_degree,
+      outputGaussians: Int(priorResult.output_gaussians),
+      densificationRatio: priorResult.densification_ratio,
+      poseUnchanged: poseUnchanged,
+      plyValidated: plyValidated
     )
   }
 
@@ -467,6 +732,95 @@ private enum ColmapKitRuntimeHarness {
     return snapshot
   }
 
+  private static func arkitWorldFromCamera(index: Int, count: Int) -> [Double] {
+    let fraction = count == 1 ? 0 : Double(index) / Double(count - 1)
+    let center = SIMD3<Double>(
+      -0.65 + 1.3 * fraction,
+      0.04 * sin(Double(index)),
+      0
+    )
+    let target = SIMD3<Double>(0, 0, 4.6)
+    let z = simd_normalize(target - center)
+    let x = simd_normalize(simd_cross(z, SIMD3<Double>(0, 1, 0)))
+    let y = simd_cross(z, x)
+    // world_from_arkit_camera = world_from_colmap_camera * diag(1,-1,-1,1)
+    return [
+      x.x, x.y, x.z, 0,
+      -y.x, -y.y, -y.z, 0,
+      -z.x, -z.y, -z.z, 0,
+      center.x, center.y, center.z, 1,
+    ]
+  }
+
+  private static func jsonDictionary(at url: URL) throws -> [String: Any] {
+    let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+    guard let dictionary = object as? [String: Any] else {
+      throw HarnessError.failed("Expected JSON object at \(url.lastPathComponent).")
+    }
+    return dictionary
+  }
+
+  private static func fixedCString<T>(_ value: inout T) -> String {
+    withUnsafePointer(to: &value) { pointer in
+      pointer.withMemoryRebound(to: CChar.self, capacity: MemoryLayout<T>.size) {
+        String(cString: $0)
+      }
+    }
+  }
+
+  private static func validateGaussianPLY(
+    at url: URL,
+    expectedVertices: Int
+  ) throws -> Bool {
+    let data = try Data(contentsOf: url)
+    let terminator = Data("end_header\n".utf8)
+    guard let terminatorRange = data.range(of: terminator) else { return false }
+    let headerEnd = terminatorRange.upperBound
+    guard let header = String(data: data[..<headerEnd], encoding: .ascii) else {
+      return false
+    }
+    let expectedProperties = [
+      "x", "y", "z", "scale_0", "scale_1", "scale_2", "opacity",
+      "rot_0", "rot_1", "rot_2", "rot_3", "f_dc_0", "f_dc_1", "f_dc_2",
+    ]
+    let properties = header.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+      let fields = line.split(whereSeparator: \.isWhitespace)
+      guard fields.count == 3, fields[0] == "property", fields[1] == "float" else {
+        return nil
+      }
+      return String(fields[2])
+    }
+    guard header.hasPrefix("ply\nformat binary_little_endian 1.0\n"),
+          header.contains("comment sh_degree 0\n"),
+          header.contains("element vertex \(expectedVertices)\n"),
+          properties == expectedProperties,
+          data.count - headerEnd == expectedVertices * 14 * MemoryLayout<Float>.size
+    else { return false }
+
+    func float(at byteOffset: Int) -> Float {
+      let bits = data.withUnsafeBytes { bytes in
+        bytes.loadUnaligned(fromByteOffset: byteOffset, as: UInt32.self)
+      }
+      return Float(bitPattern: UInt32(littleEndian: bits))
+    }
+    let shC0 = 0.28209479177387814
+    for vertex in 0..<expectedVertices {
+      let base = headerEnd + vertex * 14 * MemoryLayout<Float>.size
+      let fields = (0..<14).map { Double(float(at: base + $0 * 4)) }
+      guard fields.allSatisfy(\.isFinite),
+            exp(fields[3]) > exp(fields[5]),
+            exp(fields[4]) > exp(fields[5])
+      else { return false }
+      let quaternionNorm = sqrt(fields[7...10].reduce(0) { $0 + $1 * $1 })
+      guard abs(quaternionNorm - 1) < 1e-4 else { return false }
+      let alpha = 1 / (1 + exp(-fields[6]))
+      guard alpha > 0, alpha < 1 else { return false }
+      let rgb = fields[11...13].map { $0 * shC0 + 0.5 }
+      guard rgb.allSatisfy({ $0 >= -1e-4 && $0 <= 1.0001 }) else { return false }
+    }
+    return true
+  }
+
   private static func runReconstruction(
     fixtureURL: URL,
     rootURL: URL,
@@ -583,6 +937,16 @@ private enum ColmapKitRuntimeHarness {
         String(cString: $0)
       }
     }
+  }
+
+  private static func message(from result: ColmapKitTrackedPoseResultV2) -> String {
+    var result = result
+    return fixedCString(&result.message)
+  }
+
+  private static func message(from result: ColmapKitRGBPriorResultV2) -> String {
+    var result = result
+    return fixedCString(&result.message)
   }
 
   private static func isSuccess(_ status: ColmapKitStatus) -> Bool {

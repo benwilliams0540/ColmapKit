@@ -20,7 +20,7 @@ set(COLMAPKIT_PRIVATE_LINK_LIBS
 COLMAP_ADD_LIBRARY(
     NAME colmap_colmapkit
     SRCS
-        colmapkit.h colmapkit.cc model_postprocessing.cc
+        colmapkit.h colmapkit.cc colmapkit_v2.cc model_postprocessing.cc
     PUBLIC_LINK_LIBS
         ${COLMAPKIT_PUBLIC_LINK_LIBS}
     PRIVATE_LINK_LIBS
@@ -35,6 +35,7 @@ if(COLMAPKIT_FRAMEWORK_ENABLED)
 
     add_library(ColmapKit SHARED
         colmapkit.cc
+        colmapkit_v2.cc
         model_postprocessing.cc
         ${COLMAPKIT_PUBLIC_HEADER}
     )
@@ -78,6 +79,14 @@ COLMAP_ADD_EXECUTABLE(
         colmap_colmapkit
 )
 
+COLMAP_ADD_EXECUTABLE(
+    NAME colmapkit_v2_fixture_runner
+    SRCS
+        v2_fixture_runner.cc
+    LINK_LIBS
+        colmap_colmapkit
+)
+
 COLMAP_ADD_TEST(
     NAME model_postprocessing_test
     SRCS
@@ -90,6 +99,14 @@ COLMAP_ADD_TEST(
     NAME sparse_reconstruction_progress_test
     SRCS
         sparse_reconstruction_progress_test.cc
+    LINK_LIBS
+        colmap_colmapkit
+)
+
+COLMAP_ADD_TEST(
+    NAME colmapkit_v2_test
+    SRCS
+        colmapkit_v2_test.cc
     LINK_LIBS
         colmap_colmapkit
 )

@@ -35,6 +35,9 @@ else
     --generate-synthetic-fixture \
     --generate-only \
     --fixture-image-count 8
+  for fixture_image in "$FIXTURE_RUN_ROOT"/fixture/images/*.pgm; do
+    sips --flip vertical "$fixture_image" >/dev/null
+  done
   ditto "$FIXTURE_RUN_ROOT/fixture/images" "$APP_PATH/Fixture"
 fi
 ditto "$FRAMEWORK_SLICE" "$APP_PATH/Frameworks/ColmapKit.framework"
