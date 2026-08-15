@@ -291,6 +291,10 @@ typedef struct ColmapKitTrackedPoseConfigV2 {
   const char* evidence_path;
   ColmapKitProgressCallbackV2 progress_callback;
   void* progress_user_data;
+  // Optional maximum dimension for the RGB bitmap used only by feature
+  // extraction. Zero preserves full-resolution extraction. Keypoints are
+  // rescaled back into the encoded image coordinate system before matching.
+  uint32_t max_feature_image_size;
 } ColmapKitTrackedPoseConfigV2;
 
 typedef struct ColmapKitTrackedPoseResultV2 {

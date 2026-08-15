@@ -104,6 +104,7 @@ ColmapKitTrackedPoseConfigV2 InvalidFastConfig(
   config.output_model_path = model.c_str();
   config.refined_pose_path = poses.c_str();
   config.evidence_path = evidence.c_str();
+  config.max_feature_image_size = 720;
   return config;
 }
 

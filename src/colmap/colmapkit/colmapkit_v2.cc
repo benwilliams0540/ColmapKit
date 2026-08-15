@@ -844,11 +844,22 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
         throw std::invalid_argument(
             "Encoded dimensions do not match the decoded RGB image.");
       }
+      if (config.max_feature_image_size > 0) {
+        bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
+      }
       colmap::FeatureKeypoints keypoints;
       colmap::FeatureDescriptors descriptors;
       if (!extractor->Extract(bitmap, &keypoints, &descriptors)) {
         throw std::runtime_error("Feature extraction failed for: " +
                                  std::string(config.images[i].image_path));
+      }
+      if (bitmap.Width() != static_cast<int>(config.images[i].encoded_width) ||
+          bitmap.Height() != static_cast<int>(config.images[i].encoded_height)) {
+        const float scale_x = static_cast<float>(config.images[i].encoded_width) /
+                              bitmap.Width();
+        const float scale_y = static_cast<float>(config.images[i].encoded_height) /
+                              bitmap.Height();
+        for (auto& keypoint : keypoints) keypoint.Rescale(scale_x, scale_y);
       }
       database->WriteKeypoints(image_ids[i], keypoints);
       database->WriteDescriptors(image_ids[i], descriptors);
