@@ -779,6 +779,50 @@ std::string RGBManifestSHA(const ColmapKitTrackedImageV2* images,
   return SHA256(manifest.str());
 }
 
+void ExtractColorsFromBoundedBitmaps(
+    const ColmapKitTrackedPoseConfigV2& config,
+    const std::unordered_map<std::string, uint32_t>& input_by_name,
+    const std::vector<colmap::Bitmap>& bitmaps,
+    colmap::Reconstruction* reconstruction) {
+  struct ColorData {
+    Eigen::Vector3d sum = Eigen::Vector3d::Zero();
+    uint32_t count = 0;
+  };
+  std::unordered_map<colmap::point3D_t, ColorData> colors;
+  for (const auto image_id : reconstruction->RegImageIds()) {
+    const auto& image = reconstruction->Image(image_id);
+    const uint32_t input_index = input_by_name.at(image.Name());
+    const auto& bitmap = bitmaps[input_index];
+    if (bitmap.IsEmpty()) continue;
+    const double scale_x =
+        static_cast<double>(bitmap.Width()) / config.images[input_index].encoded_width;
+    const double scale_y = static_cast<double>(bitmap.Height()) /
+                           config.images[input_index].encoded_height;
+    for (const auto& point2D : image.Points2D()) {
+      if (!point2D.HasPoint3D()) continue;
+      const auto color = bitmap.InterpolateBilinear(
+          point2D.xy(0) * scale_x - 0.5, point2D.xy(1) * scale_y - 0.5);
+      if (!color.has_value()) continue;
+      auto& aggregate = colors[point2D.point3D_id];
+      aggregate.sum += Eigen::Vector3d(color->r, color->g, color->b);
+      ++aggregate.count;
+    }
+  }
+  for (const auto point3D_id : reconstruction->Point3DIds()) {
+    auto& point3D = reconstruction->Point3D(point3D_id);
+    const auto color = colors.find(point3D_id);
+    if (color == colors.end() || color->second.count == 0) {
+      point3D.color = Eigen::Vector3ub::Zero();
+      continue;
+    }
+    Eigen::Vector3d mean = color->second.sum / color->second.count;
+    for (Eigen::Index channel = 0; channel < mean.size(); ++channel) {
+      mean[channel] = std::round(std::clamp(mean[channel], 0.0, 255.0));
+    }
+    point3D.color = mean.cast<uint8_t>();
+  }
+}
+
 void ValidateTrackedConfig(const ColmapKitTrackedPoseConfigV2& config) {
   if (config.struct_size < kTrackedConfigMinimumSize || config.images == nullptr ||
       config.num_images < 3 || config.database_path == nullptr ||
@@ -948,26 +992,25 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
          COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION, overall_start,
          "Extracting bounded RGB features.");
     auto extractor = colmap::FeatureExtractor::Create(extraction_options);
+    std::vector<colmap::Bitmap> bounded_color_bitmaps(config.num_images);
     for (size_t p = 0; p < order.size(); ++p) {
       cancellation->ThrowIfRequested();
       const uint32_t i = order[p];
-      colmap::Bitmap bitmap;
+      colmap::Bitmap color_bitmap;
       int encoded_width = 0;
       int encoded_height = 0;
       const bool read_bounded_jpeg = ReadBoundedJpeg(
           config.images[i].image_path,
           static_cast<int>(config.max_feature_image_size),
-          extraction_options.RequiresRGB(), &bitmap, &encoded_width,
-          &encoded_height);
+          true, &color_bitmap, &encoded_width, &encoded_height);
       if (!read_bounded_jpeg &&
-          !bitmap.Read(config.images[i].image_path,
-                       extraction_options.RequiresRGB())) {
+          !color_bitmap.Read(config.images[i].image_path, true)) {
         throw std::runtime_error("Cannot read RGB input: " +
                                  std::string(config.images[i].image_path));
       }
       if (!read_bounded_jpeg) {
-        encoded_width = bitmap.Width();
-        encoded_height = bitmap.Height();
+        encoded_width = color_bitmap.Width();
+        encoded_height = color_bitmap.Height();
       }
       if (encoded_width != static_cast<int>(config.images[i].encoded_width) ||
           encoded_height != static_cast<int>(config.images[i].encoded_height)) {
@@ -975,8 +1018,12 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
             "Encoded dimensions do not match the decoded RGB image.");
       }
       if (!read_bounded_jpeg && config.max_feature_image_size > 0) {
-        bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
+        color_bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
       }
+      colmap::Bitmap bitmap = extraction_options.RequiresRGB()
+                                  ? color_bitmap.Clone()
+                                  : color_bitmap.CloneAsGrey();
+      bounded_color_bitmaps[i] = std::move(color_bitmap);
       colmap::FeatureKeypoints keypoints;
       colmap::FeatureDescriptors descriptors;
       if (!extractor->Extract(bitmap, &keypoints, &descriptors)) {
@@ -1193,8 +1240,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
          COLMAPKIT_PROGRESS_STAGE_V2_EXPORT, overall_start,
          "Writing canonical reconstruction and pose evidence.");
     std::filesystem::create_directories(model_path);
-    reconstruction.ExtractColorsForAllImages(
-        std::filesystem::path(config.images[0].image_path).parent_path());
+    ExtractColorsFromBoundedBitmaps(
+        config, input_by_name, bounded_color_bitmaps, &reconstruction);
     reconstruction.Write(model_path);
     const std::string pose_json = PosesJSON(config, order, refined, initial_poses);
     WriteDeterministicText(pose_path, pose_json);
