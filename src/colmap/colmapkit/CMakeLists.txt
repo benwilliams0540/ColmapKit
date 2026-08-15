@@ -3,6 +3,8 @@
 
 set(FOLDER_NAME "colmapkit")
 
+find_package(JPEG REQUIRED)
+
 set(COLMAPKIT_PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/colmapkit.h")
 set(COLMAPKIT_PUBLIC_LINK_LIBS
     colmap_controllers
@@ -15,6 +17,7 @@ set(COLMAPKIT_PUBLIC_LINK_LIBS
 )
 set(COLMAPKIT_PRIVATE_LINK_LIBS
     Boost::boost
+    JPEG::JPEG
 )
 
 COLMAP_ADD_LIBRARY(

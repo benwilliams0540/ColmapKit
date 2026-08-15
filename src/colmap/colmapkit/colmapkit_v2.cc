@@ -31,10 +31,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <csetjmp>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -56,6 +60,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <jpeglib.h>
 
 namespace {
 
@@ -150,6 +156,115 @@ std::string ReadFile(const std::filesystem::path& path) {
   if (!stream) throw std::runtime_error("Cannot read file: " + path.string());
   return std::string(std::istreambuf_iterator<char>(stream),
                      std::istreambuf_iterator<char>());
+}
+
+struct JpegErrorState {
+  jpeg_error_mgr manager;
+  std::jmp_buf jump;
+};
+
+void HandleJpegError(j_common_ptr info) {
+  auto* state = reinterpret_cast<JpegErrorState*>(info->err);
+  std::longjmp(state->jump, 1);
+}
+
+bool HasJpegExtension(const std::filesystem::path& path) {
+  std::string extension = path.extension().string();
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  return extension == ".jpg" || extension == ".jpeg";
+}
+
+// libjpeg can discard high-frequency DCT coefficients while decoding at 1/2,
+// 1/4, or 1/8 resolution. Use the smallest native decode that still covers
+// the requested feature bound, then apply the existing exact thumbnail step.
+// This avoids materializing full-resolution RGB solely to discard it before
+// SIFT. The caller retains the encoded dimensions for camera coordinates.
+bool ReadBoundedJpeg(const std::filesystem::path& path,
+                     const int max_image_size,
+                     const bool as_rgb,
+                     colmap::Bitmap* bitmap,
+                     int* encoded_width,
+                     int* encoded_height) {
+  if (max_image_size <= 0 || bitmap == nullptr || encoded_width == nullptr ||
+      encoded_height == nullptr || !HasJpegExtension(path)) {
+    return false;
+  }
+
+  std::FILE* file = std::fopen(path.string().c_str(), "rb");
+  if (file == nullptr) return false;
+
+  jpeg_decompress_struct info{};
+  JpegErrorState error{};
+  info.err = jpeg_std_error(&error.manager);
+  error.manager.error_exit = HandleJpegError;
+  volatile bool created = false;
+  uint8_t* volatile pixels = nullptr;
+  if (setjmp(error.jump)) {
+    if (pixels != nullptr) std::free(const_cast<uint8_t*>(pixels));
+    if (created) jpeg_destroy_decompress(&info);
+    std::fclose(file);
+    return false;
+  }
+
+  jpeg_create_decompress(&info);
+  created = true;
+  jpeg_stdio_src(&info, file);
+  if (jpeg_read_header(&info, TRUE) != JPEG_HEADER_OK) {
+    jpeg_destroy_decompress(&info);
+    std::fclose(file);
+    return false;
+  }
+  *encoded_width = static_cast<int>(info.image_width);
+  *encoded_height = static_cast<int>(info.image_height);
+  info.out_color_space = JCS_RGB;
+
+  if (std::max(*encoded_width, *encoded_height) > max_image_size) {
+    for (const unsigned int denominator : {8u, 4u, 2u, 1u}) {
+      info.scale_num = 1;
+      info.scale_denom = denominator;
+      jpeg_calc_output_dimensions(&info);
+      if (std::max(info.output_width, info.output_height) >=
+              static_cast<unsigned int>(max_image_size) ||
+          denominator == 1) {
+        break;
+      }
+    }
+  }
+
+  jpeg_start_decompress(&info);
+  const size_t row_bytes =
+      static_cast<size_t>(info.output_width) * info.output_components;
+  const size_t byte_count = row_bytes * info.output_height;
+  pixels = static_cast<uint8_t*>(std::malloc(byte_count));
+  if (pixels == nullptr) {
+    jpeg_destroy_decompress(&info);
+    std::fclose(file);
+    return false;
+  }
+  while (info.output_scanline < info.output_height) {
+    JSAMPROW row = const_cast<uint8_t*>(pixels) +
+                   static_cast<size_t>(info.output_scanline) * row_bytes;
+    jpeg_read_scanlines(&info, &row, 1);
+  }
+  const int decoded_width = static_cast<int>(info.output_width);
+  const int decoded_height = static_cast<int>(info.output_height);
+  jpeg_finish_decompress(&info);
+  jpeg_destroy_decompress(&info);
+  created = false;
+  std::fclose(file);
+
+  colmap::Bitmap decoded(decoded_width, decoded_height, true);
+  std::memcpy(decoded.RowMajorData().data(), const_cast<uint8_t*>(pixels),
+              byte_count);
+  std::free(const_cast<uint8_t*>(pixels));
+  pixels = nullptr;
+  if (!as_rgb) decoded = decoded.CloneAsGrey();
+  decoded.Thumbnail(max_image_size);
+  *bitmap = std::move(decoded);
+  return true;
 }
 
 uint32_t RotateRight(uint32_t value, uint32_t count) {
@@ -837,17 +952,29 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
       cancellation->ThrowIfRequested();
       const uint32_t i = order[p];
       colmap::Bitmap bitmap;
-      if (!bitmap.Read(config.images[i].image_path,
+      int encoded_width = 0;
+      int encoded_height = 0;
+      const bool read_bounded_jpeg = ReadBoundedJpeg(
+          config.images[i].image_path,
+          static_cast<int>(config.max_feature_image_size),
+          extraction_options.RequiresRGB(), &bitmap, &encoded_width,
+          &encoded_height);
+      if (!read_bounded_jpeg &&
+          !bitmap.Read(config.images[i].image_path,
                        extraction_options.RequiresRGB())) {
         throw std::runtime_error("Cannot read RGB input: " +
                                  std::string(config.images[i].image_path));
       }
-      if (bitmap.Width() != static_cast<int>(config.images[i].encoded_width) ||
-          bitmap.Height() != static_cast<int>(config.images[i].encoded_height)) {
+      if (!read_bounded_jpeg) {
+        encoded_width = bitmap.Width();
+        encoded_height = bitmap.Height();
+      }
+      if (encoded_width != static_cast<int>(config.images[i].encoded_width) ||
+          encoded_height != static_cast<int>(config.images[i].encoded_height)) {
         throw std::invalid_argument(
             "Encoded dimensions do not match the decoded RGB image.");
       }
-      if (config.max_feature_image_size > 0) {
+      if (!read_bounded_jpeg && config.max_feature_image_size > 0) {
         bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
       }
       colmap::FeatureKeypoints keypoints;
