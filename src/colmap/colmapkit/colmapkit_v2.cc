@@ -186,6 +186,7 @@ bool ReadBoundedJpeg(const std::filesystem::path& path,
                      const int max_image_size,
                      const bool as_rgb,
                      colmap::Bitmap* bitmap,
+                     colmap::Bitmap* bounded_rgb_bitmap,
                      int* encoded_width,
                      int* encoded_height) {
   if (max_image_size <= 0 || bitmap == nullptr || encoded_width == nullptr ||
@@ -261,6 +262,10 @@ bool ReadBoundedJpeg(const std::filesystem::path& path,
               byte_count);
   std::free(const_cast<uint8_t*>(pixels));
   pixels = nullptr;
+  if (bounded_rgb_bitmap != nullptr) {
+    *bounded_rgb_bitmap = decoded.Clone();
+    bounded_rgb_bitmap->Thumbnail(max_image_size);
+  }
   if (!as_rgb) decoded = decoded.CloneAsGrey();
   decoded.Thumbnail(max_image_size);
   *bitmap = std::move(decoded);
@@ -996,21 +1001,28 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     for (size_t p = 0; p < order.size(); ++p) {
       cancellation->ThrowIfRequested();
       const uint32_t i = order[p];
+      colmap::Bitmap bitmap;
       colmap::Bitmap color_bitmap;
       int encoded_width = 0;
       int encoded_height = 0;
       const bool read_bounded_jpeg = ReadBoundedJpeg(
           config.images[i].image_path,
           static_cast<int>(config.max_feature_image_size),
-          true, &color_bitmap, &encoded_width, &encoded_height);
+          extraction_options.RequiresRGB(), &bitmap, &color_bitmap,
+          &encoded_width, &encoded_height);
       if (!read_bounded_jpeg &&
-          !color_bitmap.Read(config.images[i].image_path, true)) {
+          !bitmap.Read(config.images[i].image_path,
+                       extraction_options.RequiresRGB())) {
         throw std::runtime_error("Cannot read RGB input: " +
                                  std::string(config.images[i].image_path));
       }
       if (!read_bounded_jpeg) {
-        encoded_width = color_bitmap.Width();
-        encoded_height = color_bitmap.Height();
+        encoded_width = bitmap.Width();
+        encoded_height = bitmap.Height();
+        if (!color_bitmap.Read(config.images[i].image_path, true)) {
+          throw std::runtime_error("Cannot read RGB input for color export: " +
+                                   std::string(config.images[i].image_path));
+        }
       }
       if (encoded_width != static_cast<int>(config.images[i].encoded_width) ||
           encoded_height != static_cast<int>(config.images[i].encoded_height)) {
@@ -1018,11 +1030,9 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
             "Encoded dimensions do not match the decoded RGB image.");
       }
       if (!read_bounded_jpeg && config.max_feature_image_size > 0) {
+        bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
         color_bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
       }
-      colmap::Bitmap bitmap = extraction_options.RequiresRGB()
-                                  ? color_bitmap.Clone()
-                                  : color_bitmap.CloneAsGrey();
       bounded_color_bitmaps[i] = std::move(color_bitmap);
       colmap::FeatureKeypoints keypoints;
       colmap::FeatureDescriptors descriptors;
