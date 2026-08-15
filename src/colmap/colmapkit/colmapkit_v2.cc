@@ -375,8 +375,11 @@ colmap::Rigid3d ARKitWorldFromCameraToColmapCameraFromWorld(
   colmap_camera_from_arkit_camera(2, 2) = -1.0;
   const Eigen::Matrix4d camera_from_world =
       colmap_camera_from_arkit_camera * world_from_arkit_camera.inverse();
+  Eigen::Quaterniond camera_rotation(
+      camera_from_world.block<3, 3>(0, 0));
+  camera_rotation.normalize();
   return colmap::Rigid3d(
-      Eigen::Quaterniond(camera_from_world.block<3, 3>(0, 0)),
+      camera_rotation,
       camera_from_world.block<3, 1>(0, 3));
 }
 
