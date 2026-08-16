@@ -20,6 +20,7 @@
 #include "colmap/sfm/incremental_triangulator.h"
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/file.h"
+#include "colmap/util/threading.h"
 #include "colmap/util/version.h"
 
 #include <Eigen/Core>
@@ -262,13 +263,23 @@ bool ReadBoundedJpeg(const std::filesystem::path& path,
               byte_count);
   std::free(const_cast<uint8_t*>(pixels));
   pixels = nullptr;
-  if (bounded_rgb_bitmap != nullptr) {
-    *bounded_rgb_bitmap = decoded.Clone();
-    bounded_rgb_bitmap->Thumbnail(max_image_size);
+  if (!as_rgb && bounded_rgb_bitmap != nullptr) {
+    // Preserve the C5 feature preprocessing order exactly: convert the native
+    // JPEG-scaled RGB decode to greyscale before the final feature thumbnail.
+    // Move the otherwise-discarded RGB decode into the export cache without a
+    // second clone or thumbnail pass on the feature-extraction critical path.
+    colmap::Bitmap grayscale = decoded.CloneAsGrey();
+    grayscale.Thumbnail(max_image_size);
+    *bitmap = std::move(grayscale);
+    *bounded_rgb_bitmap = std::move(decoded);
+  } else {
+    if (bounded_rgb_bitmap != nullptr) {
+      *bounded_rgb_bitmap = decoded.Clone();
+    }
+    if (!as_rgb) decoded = decoded.CloneAsGrey();
+    decoded.Thumbnail(max_image_size);
+    *bitmap = std::move(decoded);
   }
-  if (!as_rgb) decoded = decoded.CloneAsGrey();
-  decoded.Thumbnail(max_image_size);
-  *bitmap = std::move(decoded);
   return true;
 }
 
@@ -793,24 +804,44 @@ void ExtractColorsFromBoundedBitmaps(
     Eigen::Vector3d sum = Eigen::Vector3d::Zero();
     uint32_t count = 0;
   };
-  std::unordered_map<colmap::point3D_t, ColorData> colors;
+  // C5's full-resolution color extraction was parallel. Keep that execution
+  // property while replacing only its source: decoder-native scaled RGB
+  // buffers retained during feature preprocessing instead of a second JPEG
+  // decode of all inputs. Each task owns one stable input slot; the merge then
+  // follows input order so scheduling cannot perturb the accumulation order.
+  std::vector<std::unordered_map<colmap::point3D_t, ColorData>> image_colors(
+      config.num_images);
+  colmap::ThreadPool thread_pool;
   for (const auto image_id : reconstruction->RegImageIds()) {
-    const auto& image = reconstruction->Image(image_id);
-    const uint32_t input_index = input_by_name.at(image.Name());
-    const auto& bitmap = bitmaps[input_index];
-    if (bitmap.IsEmpty()) continue;
-    const double scale_x =
-        static_cast<double>(bitmap.Width()) / config.images[input_index].encoded_width;
-    const double scale_y = static_cast<double>(bitmap.Height()) /
-                           config.images[input_index].encoded_height;
-    for (const auto& point2D : image.Points2D()) {
-      if (!point2D.HasPoint3D()) continue;
-      const auto color = bitmap.InterpolateBilinear(
-          point2D.xy(0) * scale_x - 0.5, point2D.xy(1) * scale_y - 0.5);
-      if (!color.has_value()) continue;
-      auto& aggregate = colors[point2D.point3D_id];
-      aggregate.sum += Eigen::Vector3d(color->r, color->g, color->b);
-      ++aggregate.count;
+    thread_pool.AddTask([&, image_id]() {
+      const auto& image = reconstruction->Image(image_id);
+      const uint32_t input_index = input_by_name.at(image.Name());
+      const auto& bitmap = bitmaps[input_index];
+      if (bitmap.IsEmpty()) return;
+      const double scale_x = static_cast<double>(bitmap.Width()) /
+                             config.images[input_index].encoded_width;
+      const double scale_y = static_cast<double>(bitmap.Height()) /
+                             config.images[input_index].encoded_height;
+      auto& colors = image_colors[input_index];
+      for (const auto& point2D : image.Points2D()) {
+        if (!point2D.HasPoint3D()) continue;
+        const auto color = bitmap.InterpolateBilinear(
+            point2D.xy(0) * scale_x - 0.5, point2D.xy(1) * scale_y - 0.5);
+        if (!color.has_value()) continue;
+        auto& aggregate = colors[point2D.point3D_id];
+        aggregate.sum += Eigen::Vector3d(color->r, color->g, color->b);
+        ++aggregate.count;
+      }
+    });
+  }
+  thread_pool.Wait();
+
+  std::unordered_map<colmap::point3D_t, ColorData> colors;
+  for (const auto& input_colors : image_colors) {
+    for (const auto& [point3D_id, input_color] : input_colors) {
+      auto& aggregate = colors[point3D_id];
+      aggregate.sum += input_color.sum;
+      aggregate.count += input_color.count;
     }
   }
   for (const auto point3D_id : reconstruction->Point3DIds()) {
@@ -1250,9 +1281,15 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
          COLMAPKIT_PROGRESS_STAGE_V2_EXPORT, overall_start,
          "Writing canonical reconstruction and pose evidence.");
     std::filesystem::create_directories(model_path);
+    const auto color_export_start = Clock::now();
     ExtractColorsFromBoundedBitmaps(
         config, input_by_name, bounded_color_bitmaps, &reconstruction);
+    const double color_export_seconds =
+        Seconds(Clock::now() - color_export_start).count();
+    const auto model_write_start = Clock::now();
     reconstruction.Write(model_path);
+    const double model_write_seconds =
+        Seconds(Clock::now() - model_write_start).count();
     const std::string pose_json = PosesJSON(config, order, refined, initial_poses);
     WriteDeterministicText(pose_path, pose_json);
     const std::string pose_sha = SHA256(pose_json);
@@ -1275,6 +1312,11 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << "  \"matched_pairs\": " << local.matched_pairs << ",\n"
              << "  \"sparse_points\": " << local.sparse_points << ",\n"
              << "  \"observations\": " << local.observations << ",\n"
+             << "  \"color_source\": \"feature_decoder_native_scale_cache\",\n"
+             << "  \"color_feature_bound_max_dimension\": "
+             << config.max_feature_image_size << ",\n"
+             << "  \"color_export_seconds\": " << color_export_seconds << ",\n"
+             << "  \"model_write_seconds\": " << model_write_seconds << ",\n"
              << "  \"initial_mean_reprojection_error\": "
              << local.initial_mean_reprojection_error << ",\n"
              << "  \"final_mean_reprojection_error\": "
