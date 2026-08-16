@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -81,6 +82,7 @@ constexpr uint32_t kPriorResultMinimumSize =
     offsetof(ColmapKitRGBPriorResultV2, status) + sizeof(uint32_t);
 constexpr double kRigidTolerance = 1e-5;
 constexpr double kAnchorTolerance = 1e-10;
+constexpr size_t kTrackedFeatureWorkerLimit = 2;
 constexpr char kReleaseVersion[] = "0.3.0-dev";
 
 class CancelledError : public std::runtime_error {
@@ -1054,60 +1056,123 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     Emit(config.progress_callback, config.progress_user_data,
          COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION, overall_start,
          "Extracting bounded RGB features.");
-    auto extractor = colmap::FeatureExtractor::Create(extraction_options);
+    const size_t feature_worker_count = std::min(
+        order.size(),
+        std::min(kTrackedFeatureWorkerLimit,
+                 static_cast<size_t>(config.num_threads == 0
+                                         ? 1
+                                         : config.num_threads)));
+    struct ExtractedFeatures {
+      colmap::Bitmap color_bitmap;
+      colmap::FeatureKeypoints keypoints;
+      colmap::FeatureDescriptors descriptors;
+    };
+    std::vector<std::optional<ExtractedFeatures>> extracted_features(
+        config.num_images);
+    std::atomic<size_t> next_feature_order_index{0};
+    std::atomic<bool> stop_feature_workers{false};
+    std::mutex feature_error_mutex;
+    std::exception_ptr feature_error;
+    auto extract_features = [&]() {
+      try {
+        const colmap::FeatureExtractionOptions worker_options =
+            extraction_options;
+        auto extractor = colmap::FeatureExtractor::Create(worker_options);
+        while (!stop_feature_workers.load(std::memory_order_acquire)) {
+          const size_t p = next_feature_order_index.fetch_add(
+              1, std::memory_order_relaxed);
+          if (p >= order.size()) break;
+          cancellation->ThrowIfRequested();
+          const uint32_t i = order[p];
+          colmap::Bitmap bitmap;
+          colmap::Bitmap color_bitmap;
+          int encoded_width = 0;
+          int encoded_height = 0;
+          const bool read_bounded_jpeg = ReadBoundedJpeg(
+              config.images[i].image_path,
+              static_cast<int>(config.max_feature_image_size),
+              worker_options.RequiresRGB(), &bitmap, &color_bitmap,
+              &encoded_width, &encoded_height);
+          if (!read_bounded_jpeg &&
+              !bitmap.Read(config.images[i].image_path,
+                           worker_options.RequiresRGB())) {
+            throw std::runtime_error(
+                "Cannot read RGB input: " +
+                std::string(config.images[i].image_path));
+          }
+          if (!read_bounded_jpeg) {
+            encoded_width = bitmap.Width();
+            encoded_height = bitmap.Height();
+            if (!color_bitmap.Read(config.images[i].image_path, true)) {
+              throw std::runtime_error(
+                  "Cannot read RGB input for color export: " +
+                  std::string(config.images[i].image_path));
+            }
+          }
+          if (encoded_width !=
+                  static_cast<int>(config.images[i].encoded_width) ||
+              encoded_height !=
+                  static_cast<int>(config.images[i].encoded_height)) {
+            throw std::invalid_argument(
+                "Encoded dimensions do not match the decoded RGB image.");
+          }
+          if (!read_bounded_jpeg && config.max_feature_image_size > 0) {
+            bitmap.Thumbnail(
+                static_cast<int>(config.max_feature_image_size));
+            color_bitmap.Thumbnail(
+                static_cast<int>(config.max_feature_image_size));
+          }
+          colmap::FeatureKeypoints keypoints;
+          colmap::FeatureDescriptors descriptors;
+          if (!extractor->Extract(bitmap, &keypoints, &descriptors)) {
+            throw std::runtime_error(
+                "Feature extraction failed for: " +
+                std::string(config.images[i].image_path));
+          }
+          if (bitmap.Width() !=
+                  static_cast<int>(config.images[i].encoded_width) ||
+              bitmap.Height() !=
+                  static_cast<int>(config.images[i].encoded_height)) {
+            const float scale_x =
+                static_cast<float>(config.images[i].encoded_width) /
+                bitmap.Width();
+            const float scale_y =
+                static_cast<float>(config.images[i].encoded_height) /
+                bitmap.Height();
+            for (auto& keypoint : keypoints) {
+              keypoint.Rescale(scale_x, scale_y);
+            }
+          }
+          extracted_features[i] = ExtractedFeatures{
+              std::move(color_bitmap), std::move(keypoints),
+              std::move(descriptors)};
+        }
+      } catch (...) {
+        stop_feature_workers.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(feature_error_mutex);
+        if (feature_error == nullptr) feature_error = std::current_exception();
+      }
+    };
+    std::vector<std::thread> feature_workers;
+    feature_workers.reserve(feature_worker_count);
+    for (size_t i = 0; i < feature_worker_count; ++i) {
+      feature_workers.emplace_back(extract_features);
+    }
+    for (auto& worker : feature_workers) worker.join();
+    if (feature_error != nullptr) std::rethrow_exception(feature_error);
+
     std::vector<colmap::Bitmap> bounded_color_bitmaps(config.num_images);
     for (size_t p = 0; p < order.size(); ++p) {
       cancellation->ThrowIfRequested();
       const uint32_t i = order[p];
-      colmap::Bitmap bitmap;
-      colmap::Bitmap color_bitmap;
-      int encoded_width = 0;
-      int encoded_height = 0;
-      const bool read_bounded_jpeg = ReadBoundedJpeg(
-          config.images[i].image_path,
-          static_cast<int>(config.max_feature_image_size),
-          extraction_options.RequiresRGB(), &bitmap, &color_bitmap,
-          &encoded_width, &encoded_height);
-      if (!read_bounded_jpeg &&
-          !bitmap.Read(config.images[i].image_path,
-                       extraction_options.RequiresRGB())) {
-        throw std::runtime_error("Cannot read RGB input: " +
+      if (!extracted_features[i].has_value()) {
+        throw std::runtime_error("Feature extraction produced no result for: " +
                                  std::string(config.images[i].image_path));
       }
-      if (!read_bounded_jpeg) {
-        encoded_width = bitmap.Width();
-        encoded_height = bitmap.Height();
-        if (!color_bitmap.Read(config.images[i].image_path, true)) {
-          throw std::runtime_error("Cannot read RGB input for color export: " +
-                                   std::string(config.images[i].image_path));
-        }
-      }
-      if (encoded_width != static_cast<int>(config.images[i].encoded_width) ||
-          encoded_height != static_cast<int>(config.images[i].encoded_height)) {
-        throw std::invalid_argument(
-            "Encoded dimensions do not match the decoded RGB image.");
-      }
-      if (!read_bounded_jpeg && config.max_feature_image_size > 0) {
-        bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
-        color_bitmap.Thumbnail(static_cast<int>(config.max_feature_image_size));
-      }
-      bounded_color_bitmaps[i] = std::move(color_bitmap);
-      colmap::FeatureKeypoints keypoints;
-      colmap::FeatureDescriptors descriptors;
-      if (!extractor->Extract(bitmap, &keypoints, &descriptors)) {
-        throw std::runtime_error("Feature extraction failed for: " +
-                                 std::string(config.images[i].image_path));
-      }
-      if (bitmap.Width() != static_cast<int>(config.images[i].encoded_width) ||
-          bitmap.Height() != static_cast<int>(config.images[i].encoded_height)) {
-        const float scale_x = static_cast<float>(config.images[i].encoded_width) /
-                              bitmap.Width();
-        const float scale_y = static_cast<float>(config.images[i].encoded_height) /
-                              bitmap.Height();
-        for (auto& keypoint : keypoints) keypoint.Rescale(scale_x, scale_y);
-      }
-      database->WriteKeypoints(image_ids[i], keypoints);
-      database->WriteDescriptors(image_ids[i], descriptors);
+      auto features = std::move(extracted_features[i].value());
+      bounded_color_bitmaps[i] = std::move(features.color_bitmap);
+      database->WriteKeypoints(image_ids[i], features.keypoints);
+      database->WriteDescriptors(image_ids[i], features.descriptors);
       Emit(config.progress_callback, config.progress_user_data,
            COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION, overall_start,
            "Extracting bounded RGB features.",
@@ -1356,6 +1421,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << "  \"rgb_hash_source\": "
                 "\"four_worker_single_per_image_export_cache\",\n"
              << "  \"rgb_hash_seconds\": " << rgb_hash_seconds << ",\n"
+             << "  \"feature_extraction_worker_count\": "
+             << feature_worker_count << ",\n"
              << "  \"pose_manifest_seconds\": " << pose_manifest_seconds << ",\n"
              << "  \"initial_mean_reprojection_error\": "
              << local.initial_mean_reprojection_error << ",\n"
