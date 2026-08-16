@@ -786,9 +786,16 @@ std::string RelativeImageName(const ColmapKitTrackedImageV2& image) {
 std::vector<std::string> RGBSHA256s(
     const ColmapKitTrackedImageV2* images, uint32_t count) {
   std::vector<std::string> sha256s(count);
+  // Four workers cap transient full-file buffers at roughly 32 MB for the
+  // current 8 MB capture images while allowing the independent digests to use
+  // multiple CPU cores. Each task owns one output slot, so result order stays
+  // deterministic regardless of scheduling.
+  colmap::ThreadPool thread_pool(std::min<int>(4, count));
   for (uint32_t i = 0; i < count; ++i) {
-    sha256s[i] = FileSHA256(images[i].image_path);
+    thread_pool.AddTask(
+        [&, i]() { sha256s[i] = FileSHA256(images[i].image_path); });
   }
+  thread_pool.Wait();
   return sha256s;
 }
 
@@ -1346,7 +1353,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << config.max_feature_image_size << ",\n"
              << "  \"color_export_seconds\": " << color_export_seconds << ",\n"
              << "  \"model_write_seconds\": " << model_write_seconds << ",\n"
-             << "  \"rgb_hash_source\": \"single_per_image_export_cache\",\n"
+             << "  \"rgb_hash_source\": "
+                "\"four_worker_single_per_image_export_cache\",\n"
              << "  \"rgb_hash_seconds\": " << rgb_hash_seconds << ",\n"
              << "  \"pose_manifest_seconds\": " << pose_manifest_seconds << ",\n"
              << "  \"initial_mean_reprojection_error\": "
