@@ -783,16 +783,35 @@ std::string RelativeImageName(const ColmapKitTrackedImageV2& image) {
   return std::filesystem::path(image.image_path).filename().string();
 }
 
+std::vector<std::string> RGBSHA256s(
+    const ColmapKitTrackedImageV2* images, uint32_t count) {
+  std::vector<std::string> sha256s(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    sha256s[i] = FileSHA256(images[i].image_path);
+  }
+  return sha256s;
+}
+
 std::string RGBManifestSHA(const ColmapKitTrackedImageV2* images,
-                           const std::vector<uint32_t>& order) {
+                           const std::vector<uint32_t>& order,
+                           const std::vector<std::string>& sha256s) {
+  if (sha256s.size() < order.size()) {
+    throw std::invalid_argument("RGB SHA-256 cache does not cover every image.");
+  }
   std::ostringstream manifest;
   manifest.imbue(std::locale::classic());
   for (const uint32_t i : order) {
     manifest << images[i].stable_id << '\t' << images[i].order_index << '\t'
              << RelativeImageName(images[i]) << '\t'
-             << FileSHA256(images[i].image_path) << '\n';
+             << sha256s[i] << '\n';
   }
   return SHA256(manifest.str());
+}
+
+std::string RGBManifestSHA(const ColmapKitTrackedImageV2* images,
+                           const std::vector<uint32_t>& order) {
+  return RGBManifestSHA(images, order,
+                        RGBSHA256s(images, static_cast<uint32_t>(order.size())));
 }
 
 void ExtractColorsFromBoundedBitmaps(
@@ -916,7 +935,8 @@ std::vector<colmap::Rigid3d> InitialPoses(
 std::string PosesJSON(const ColmapKitTrackedPoseConfigV2& config,
                       const std::vector<uint32_t>& order,
                       const std::vector<colmap::Rigid3d>& refined,
-                      const std::vector<colmap::Rigid3d>& initial) {
+                      const std::vector<colmap::Rigid3d>& initial,
+                      const std::vector<std::string>& rgb_sha256s) {
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out << std::setprecision(17);
@@ -925,7 +945,7 @@ std::string PosesJSON(const ColmapKitTrackedPoseConfigV2& config,
          "  \"pose_convention\": \"column_major_world_from_camera\",\n"
          "  \"gauge\": \"two_arkit_camera_frames_fixed_during_ba\",\n";
   out << "  \"rgb_manifest_sha256\": \""
-      << RGBManifestSHA(config.images, order) << "\",\n"
+      << RGBManifestSHA(config.images, order, rgb_sha256s) << "\",\n"
       << "  \"images\": [\n";
   const Eigen::Matrix4d basis =
       (Eigen::Vector4d(1.0, -1.0, -1.0, 1.0)).asDiagonal();
@@ -939,7 +959,7 @@ std::string PosesJSON(const ColmapKitTrackedPoseConfigV2& config,
     out << "    {\"stable_id\":" << config.images[i].stable_id
         << ",\"order_index\":" << config.images[i].order_index
         << ",\"image\":\"" << JsonEscape(RelativeImageName(config.images[i]))
-        << "\",\"rgb_sha256\":\"" << FileSHA256(config.images[i].image_path)
+        << "\",\"rgb_sha256\":\"" << rgb_sha256s[i]
         << "\",\"translation_weight\":" << config.images[i].translation_weight
         << ",\"rotation_weight\":" << config.images[i].rotation_weight
         << ",\"translation_correction_meters\":"
@@ -1290,9 +1310,18 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     reconstruction.Write(model_path);
     const double model_write_seconds =
         Seconds(Clock::now() - model_write_start).count();
-    const std::string pose_json = PosesJSON(config, order, refined, initial_poses);
+    const auto rgb_hash_start = Clock::now();
+    const std::vector<std::string> rgb_sha256s =
+        RGBSHA256s(config.images, config.num_images);
+    const double rgb_hash_seconds =
+        Seconds(Clock::now() - rgb_hash_start).count();
+    const auto pose_manifest_start = Clock::now();
+    const std::string pose_json =
+        PosesJSON(config, order, refined, initial_poses, rgb_sha256s);
     WriteDeterministicText(pose_path, pose_json);
     const std::string pose_sha = SHA256(pose_json);
+    const double pose_manifest_seconds =
+        Seconds(Clock::now() - pose_manifest_start).count();
     CopyText<ColmapKitTrackedPoseResultV2>(
         local.refined_pose_sha256, sizeof(local.refined_pose_sha256), pose_sha);
     local.registered_images = static_cast<uint32_t>(reconstruction.NumRegImages());
@@ -1317,6 +1346,9 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << config.max_feature_image_size << ",\n"
              << "  \"color_export_seconds\": " << color_export_seconds << ",\n"
              << "  \"model_write_seconds\": " << model_write_seconds << ",\n"
+             << "  \"rgb_hash_source\": \"single_per_image_export_cache\",\n"
+             << "  \"rgb_hash_seconds\": " << rgb_hash_seconds << ",\n"
+             << "  \"pose_manifest_seconds\": " << pose_manifest_seconds << ",\n"
              << "  \"initial_mean_reprojection_error\": "
              << local.initial_mean_reprojection_error << ",\n"
              << "  \"final_mean_reprojection_error\": "
