@@ -37,7 +37,6 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <string>
 
 namespace colmap {
 

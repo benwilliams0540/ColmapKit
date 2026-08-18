@@ -32,7 +32,6 @@
 #include "colmap/geometry/rigid3.h"
 #include "colmap/geometry/sim3.h"
 #include "colmap/util/eigen_alignment.h"
-#include "colmap/util/logging.h"
 #include "colmap/util/types.h"
 
 #include <vector>
@@ -42,6 +41,21 @@
 #include <Eigen/SVD>
 
 namespace colmap {
+
+// A unit bearing and the Jacobian d(ray)/d(pixel) of its unprojection (see
+// Camera::CamRayFromImgWithJac), bundled so RANSAC subsampling keeps them
+// index-aligned.
+struct CamRayWithJac {
+  Eigen::Vector3d ray;
+  Eigen::Matrix3x2d jacobian;
+
+  // Fallback when unprojection fails. The estimators take a dense
+  // vector<CamRayWithJac>, not optionals, so a failed ray is kept as zero,
+  // which the tangent Sampson residual scores as infinite (rejected).
+  static CamRayWithJac Zero() {
+    return {Eigen::Vector3d::Zero(), Eigen::Matrix3x2d::Zero()};
+  }
+};
 
 // Average unit vectors by finding the principal component of the outer product
 // sum matrix. Uses SVD to find the direction with maximum variance.
@@ -143,17 +157,22 @@ Rigid3d InterpolateCameraPoses(const Rigid3d& cam1_from_world,
                                const Rigid3d& cam2_from_world,
                                double t);
 
-// Perform cheirality constraint test, i.e., determine which of the triangulated
-// correspondences lie in front of both cameras.
+// Perform cheirality constraint test, i.e., determine which corresponding rays
+// triangulate to a point in front of both cameras.
+//
+// NOTE: The closed-form depth test assumes both rays are unit-normalized;
+// passing rays of arbitrary scale yields incorrect cheirality results.
 //
 // @param cam2_from_cam1  Relative camera transformation.
-// @param cam_rays1       First set of corresponding rays.
-// @param cam_rays2       Second set of corresponding rays.
-// @param points3D        Points that lie in front of both cameras.
+// @param cam_rays1       First set of corresponding rays (must be unit-norm).
+// @param cam_rays2       Second set of corresponding rays (must be unit-norm).
+// @param valid_indices   Indices of correspondences in front of both cameras.
+//
+// @return                Whether any correspondence lies in front of both.
 bool CheckCheirality(const Rigid3d& cam2_from_cam1,
                      const std::vector<Eigen::Vector3d>& cam_rays1,
                      const std::vector<Eigen::Vector3d>& cam_rays2,
-                     std::vector<Eigen::Vector3d>* points3D);
+                     std::vector<int>* valid_indices);
 
 Rigid3d TransformCameraWorld(const Sim3d& new_from_old_world,
                              const Rigid3d& cam_from_world);

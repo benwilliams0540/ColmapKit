@@ -31,15 +31,16 @@ start from the ``src/colmap/tools/example.cc`` code template and implement the d
 functionality directly as a new binary within COLMAP.
 
 
-Choosing between SIFT and ALIKED features
------------------------------------------
+Choosing between SIFT, ALIKED, and LoMa features
+------------------------------------------------
 
-COLMAP supports two feature extraction algorithms: SIFT (default) and ALIKED
-(requires ONNX support). Here are some guidelines for choosing between them:
+COLMAP supports three feature extraction algorithms: SIFT (default), ALIKED,
+and LoMa (the latter two require ONNX support). Here are some guidelines for
+choosing between them:
 
 - **SIFT** is the most widely tested and robust choice. It works well for
   scenarios with moderate to high view overlap, sufficient scene texture,
-  and captured under similar illumination conditiions. It supports both GPU
+  and captured under similar illumination conditions. It supports both GPU
   and CPU extraction.
 
 - **ALIKED** is a learned feature extractor that can produce more repeatable
@@ -47,11 +48,17 @@ COLMAP supports two feature extraction algorithms: SIFT (default) and ALIKED
   little scene texture, and drastic illumination changes. It requires ONNX
   Runtime at build time (``-DONNX_ENABLED=ON``).
 
-Both feature types support brute-force matching as well as LightGlue neural
+- **LoMa** is a learned feature extractor targeting the same difficult
+  scenarios as ALIKED, paired with dedicated matchers that trade inference
+  cost for matching quality. It also requires ONNX Runtime at build time.
+
+SIFT and ALIKED support brute-force matching as well as LightGlue neural
 network-based matching. LightGlue typically produces higher inlier ratios,
 especially for image pairs with large viewpoint or illumination changes, but
-requires ONNX support. See :ref:`Feature Extraction and Matching <features>`
-for details on available options.
+requires ONNX support. LoMa descriptors are matched either brute-force or with
+one of the dedicated LoMa matchers. See
+:ref:`Feature Extraction and Matching <features>` for details on available
+options.
 
 Do not mix different feature types (e.g., SIFT and ALIKED) in the same
 database, as the descriptors are incompatible.
@@ -89,6 +96,36 @@ Overly complex models with many parameters can lead to degenerate or overfitted
 calibration, especially when few images share intrinsics. If in doubt, start
 with ``SIMPLE_RADIAL`` and inspect the reprojection errors in the model
 statistics.
+
+
+Using calibration from OpenCV, Kalibr, or other tools
+-----------------------------------------------------
+
+If you already calibrated your camera with an external tool such as OpenCV or
+Kalibr, you can reuse those intrinsics in COLMAP (see :ref:`Fix intrinsics
+<faq-fix-intrinsics>` to keep them constant during reconstruction). Two
+conventions have to be matched first.
+
+**Pixel coordinate convention.** COLMAP places the origin at the top-left
+*corner* of the image, so the center of the top-left pixel is at ``(0.5, 0.5)``
+and a centered principal point is ``(width / 2, height / 2)``. OpenCV and Kalibr
+place integer coordinates at pixel *centers*, so their centered principal point
+is ``((width - 1) / 2, (height - 1) / 2)``. To convert a principal point from
+OpenCV/Kalibr to COLMAP, add ``0.5`` to both ``cx`` and ``cy``::
+
+    cx_colmap = cx_opencv + 0.5
+    cy_colmap = cy_opencv + 0.5
+
+For example, an OpenCV calibration of an 800×600 image with a centered principal
+point ``(399.5, 299.5)`` becomes ``(400.0, 300.0)`` in COLMAP. The focal lengths
+``fx``, ``fy`` and the distortion coefficients are unaffected by this shift.
+
+**Distortion parameter order.** COLMAP's ``OPENCV`` model uses the same
+``k1, k2, p1, p2`` distortion parameters as OpenCV, and ``FULL_OPENCV``
+additionally uses ``k3, k4, k5, k6``, in that order (see :doc:`cameras`). A
+camera line in ``cameras.txt`` for the example above is therefore::
+
+    1 OPENCV 800 600 fx fy 400.0 300.0 k1 k2 p1 p2
 
 
 Choosing between incremental, global, and hierarchical SfM
@@ -162,6 +199,42 @@ models. Images share the same intrinsics, if they refer to the same camera, as
 specified by the ``camera_id`` property in the database. You can add new cameras
 and set shared intrinsics in the database management tool. Please, refer to
 :ref:`Database Management <database-management>` for more information.
+
+
+Set known camera intrinsics
+---------------------------
+
+If the camera calibration is known a priori, the recommended way to provide it
+is during feature extraction using the ``ImageReader`` options::
+
+    colmap feature_extractor \
+        --database_path $PROJECT_PATH/database.db \
+        --image_path $PROJECT_PATH/images \
+        --ImageReader.single_camera 1 \
+        --ImageReader.camera_model OPENCV \
+        --ImageReader.camera_params "fx,fy,cx,cy,k1,k2,p1,p2"
+
+The parameters must be provided as a comma-separated list in the order defined
+by the chosen camera model (see :doc:`cameras`). In the GUI, the equivalent
+settings can be found under ``Processing > Feature extraction > Custom
+parameters``. Use ``--ImageReader.single_camera 1`` if all images were captured
+by the same physical camera with identical settings, so that they share one
+camera in the database (see `Share intrinsics`_).
+
+To modify the intrinsics of an existing database, do not edit the SQLite tables
+by hand (the parameters are stored as binary blobs of doubles), but use
+pycolmap's database API instead::
+
+    import pycolmap
+    with pycolmap.Database.open("path/to/database.db") as db:
+        camera = db.read_camera(1)
+        camera.params = [fx, fy, cx, cy, k1, k2, p1, p2]
+        camera.has_prior_focal_length = True
+        db.update_camera(camera)
+
+Note that the provided parameters are still refined during bundle adjustment by
+default. To keep them fixed during the reconstruction, see
+:ref:`Fix intrinsics <faq-fix-intrinsics>`.
 
 
 .. _faq-fix-intrinsics:
@@ -409,7 +482,7 @@ extraction. The orientation is converted to a gravity direction vector in sensor
 coordinates, which is stored as part of the pose prior in the database. This
 gravity information is used during feature extraction and matching to improve
 robustness against image rotation. This is crucial for feature extractors/matchers
-with limited orientation invariance, such as ALIKED and LightGlue.
+with limited orientation invariance, such as ALIKED, LightGlue, and LoMa.
 
 
 
