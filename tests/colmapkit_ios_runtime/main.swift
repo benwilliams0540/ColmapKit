@@ -871,7 +871,13 @@ private enum ColmapKitRuntimeHarness {
       mapper_random_seed: 0,
       write_sparse_text: 1,
       progress_callback: nil,
-      progress_user_data: nil
+      progress_user_data: nil,
+      extraction_num_threads: 0,
+      matching_num_threads: 0,
+      mapper_num_threads: 0,
+      require_metal_sift: 0,
+      require_metal_matching: 0,
+      evidence_path: nil
     )
     var jobPointer: OpaquePointer?
     let startStatus = ColmapKitStartSparseReconstruction(&config, &jobPointer)
