@@ -35,6 +35,7 @@
 #include <cmath>
 #include <limits>
 #include <mutex>
+#include <stdexcept>
 
 namespace colmap {
 
@@ -56,7 +57,65 @@ bool ComputeMetalSiftTop2Matches(
 }  // namespace
 
 bool IsMetalSiftMatcherAvailable() { return false; }
+
+std::string GetMetalSiftMatcherDeviceName() { return {}; }
 #endif
+
+void MetalRuntimeTelemetry::RecordDeviceName(const std::string& value) {
+  if (value.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(strings_mutex_);
+  device_name_ = value;
+}
+
+void MetalRuntimeTelemetry::RecordSiftExtraction(const bool succeeded,
+                                                 const std::string& device,
+                                                 const std::string& failure) {
+  RecordDeviceName(device);
+  if (succeeded) {
+    sift_extraction_operations_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    sift_extraction_failures_.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (!failure.empty()) {
+    std::lock_guard<std::mutex> lock(strings_mutex_);
+    last_failure_ = failure;
+  }
+}
+
+void MetalRuntimeTelemetry::RecordSiftMatching(const bool used_metal,
+                                               const std::string& device,
+                                               const std::string& failure) {
+  RecordDeviceName(device);
+  if (used_metal) {
+    sift_matching_operations_.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    sift_matching_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (!failure.empty()) {
+    std::lock_guard<std::mutex> lock(strings_mutex_);
+    last_failure_ = failure;
+  }
+}
+
+MetalRuntimeTelemetrySnapshot MetalRuntimeTelemetry::Snapshot() const {
+  MetalRuntimeTelemetrySnapshot snapshot;
+  snapshot.sift_extraction_operations =
+      sift_extraction_operations_.load(std::memory_order_relaxed);
+  snapshot.sift_extraction_failures =
+      sift_extraction_failures_.load(std::memory_order_relaxed);
+  snapshot.sift_matching_operations =
+      sift_matching_operations_.load(std::memory_order_relaxed);
+  snapshot.sift_matching_fallbacks =
+      sift_matching_fallbacks_.load(std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(strings_mutex_);
+    snapshot.device_name = device_name_;
+    snapshot.last_failure = last_failure_;
+  }
+  return snapshot;
+}
 
 namespace {
 
@@ -208,7 +267,20 @@ std::vector<MetalSiftTop2Match> MetalSiftDescriptorMatcher::ComputeTop2(
     std::vector<MetalSiftTop2Match> top2_matches;
     if (ComputeMetalSiftTop2Matches(
             query_descriptors, train_descriptors, &top2_matches)) {
+      if (options_.runtime_telemetry != nullptr) {
+        options_.runtime_telemetry->RecordSiftMatching(
+            true, GetMetalSiftMatcherDeviceName());
+      }
       return top2_matches;
+    }
+    const std::string failure =
+        "Metal SIFT descriptor matching was unavailable or failed at runtime.";
+    if (options_.runtime_telemetry != nullptr) {
+      options_.runtime_telemetry->RecordSiftMatching(
+          false, GetMetalSiftMatcherDeviceName(), failure);
+    }
+    if (options_.require_metal) {
+      throw std::runtime_error(failure);
     }
     WarnMetalFallbackOnce();
   }

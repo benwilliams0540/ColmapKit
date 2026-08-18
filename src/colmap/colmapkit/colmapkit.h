@@ -47,6 +47,7 @@ extern "C" {
 #endif
 
 #define COLMAPKIT_MESSAGE_CAPACITY 1024
+#define COLMAPKIT_METAL_DEVICE_NAME_CAPACITY 128
 
 typedef enum ColmapKitStatus {
   COLMAPKIT_STATUS_OK = 0,
@@ -66,6 +67,12 @@ typedef enum ColmapKitModelOutputType {
   COLMAPKIT_MODEL_OUTPUT_TYPE_BIN = 0,
   COLMAPKIT_MODEL_OUTPUT_TYPE_TXT = 1
 } ColmapKitModelOutputType;
+
+typedef enum ColmapKitComputeBackend {
+  COLMAPKIT_COMPUTE_BACKEND_UNKNOWN = 0,
+  COLMAPKIT_COMPUTE_BACKEND_CPU = 1,
+  COLMAPKIT_COMPUTE_BACKEND_METAL = 2
+} ColmapKitComputeBackend;
 
 typedef enum ColmapKitProgressStage {
   COLMAPKIT_PROGRESS_STAGE_PREPARING = 0,
@@ -116,6 +123,16 @@ typedef struct ColmapKitSparseReconstructionConfig {
   int write_sparse_text;
   ColmapKitProgressCallback progress_callback;
   void* progress_user_data;
+  // Additive acceleration controls. Zero inherits num_threads. These fields
+  // are ignored for v0.2.1-sized callers.
+  int extraction_num_threads;
+  int matching_num_threads;
+  int mapper_num_threads;
+  // When nonzero, a requested Metal path fails instead of falling back.
+  int require_metal_sift;
+  int require_metal_matching;
+  // Optional mechanically readable JSON evidence output.
+  const char* evidence_path;
 } ColmapKitSparseReconstructionConfig;
 
 typedef struct ColmapKitSparseReconstructionResult {
@@ -128,6 +145,36 @@ typedef struct ColmapKitSparseReconstructionResult {
   size_t observations;
   double mean_reprojection_error;
   char message[COLMAPKIT_MESSAGE_CAPACITY];
+  uint32_t sparse_reconstruction_abi_version;
+  uint32_t no_fallback_satisfied;
+  int requested_extraction_num_threads;
+  int requested_matching_num_threads;
+  int requested_mapper_num_threads;
+  int effective_extraction_num_threads;
+  int effective_matching_num_threads;
+  int effective_geometric_verification_num_threads;
+  int effective_mapper_num_threads;
+  int effective_bundle_adjustment_num_threads;
+  ColmapKitComputeBackend extraction_backend;
+  ColmapKitComputeBackend matching_backend;
+  ColmapKitComputeBackend mapping_backend;
+  ColmapKitComputeBackend bundle_adjustment_backend;
+  int metal_matching_compiled;
+  int metal_matching_available;
+  int metal_sift_compiled;
+  int metal_sift_available;
+  int metal_sift_requested;
+  uint64_t metal_sift_operations;
+  uint64_t metal_matching_operations;
+  uint64_t metal_sift_fallbacks;
+  uint64_t metal_matching_fallbacks;
+  double extraction_seconds;
+  double matching_seconds;
+  double mapping_bundle_adjustment_seconds;
+  double export_seconds;
+  double total_seconds;
+  uint64_t peak_resident_memory_bytes;
+  char metal_device_name[COLMAPKIT_METAL_DEVICE_NAME_CAPACITY];
 } ColmapKitSparseReconstructionResult;
 
 typedef struct ColmapKitPointFilteringConfig {
@@ -412,21 +459,21 @@ COLMAPKIT_EXPORT ColmapKitStatus ColmapKitRunTrackedPoseReconstructionV2(
     const ColmapKitTrackedPoseConfigV2* config,
     ColmapKitTrackedPoseResultV2* result);
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartTrackedPoseReconstructionV2(
-    const ColmapKitTrackedPoseConfigV2* config, ColmapKitTrackedPoseJobV2** job);
-COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelTrackedPoseReconstructionV2(
-    ColmapKitTrackedPoseJobV2* job);
+    const ColmapKitTrackedPoseConfigV2* config,
+    ColmapKitTrackedPoseJobV2** job);
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitCancelTrackedPoseReconstructionV2(ColmapKitTrackedPoseJobV2* job);
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitTrackedPoseReconstructionV2(
     ColmapKitTrackedPoseJobV2* job, ColmapKitTrackedPoseResultV2* result);
 COLMAPKIT_EXPORT void ColmapKitReleaseTrackedPoseReconstructionJobV2(
     ColmapKitTrackedPoseJobV2* job);
 
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitRunRGBGaussianPriorV2(
-    const ColmapKitRGBPriorConfigV2* config,
-    ColmapKitRGBPriorResultV2* result);
+    const ColmapKitRGBPriorConfigV2* config, ColmapKitRGBPriorResultV2* result);
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartRGBGaussianPriorV2(
     const ColmapKitRGBPriorConfigV2* config, ColmapKitRGBPriorJobV2** job);
-COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelRGBGaussianPriorV2(
-    ColmapKitRGBPriorJobV2* job);
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitCancelRGBGaussianPriorV2(ColmapKitRGBPriorJobV2* job);
 COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitRGBGaussianPriorV2(
     ColmapKitRGBPriorJobV2* job, ColmapKitRGBPriorResultV2* result);
 COLMAPKIT_EXPORT void ColmapKitReleaseRGBGaussianPriorJobV2(

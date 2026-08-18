@@ -321,6 +321,7 @@ shasum -a 256 "$ZIP_PATH" > "$DIST_ROOT/ColmapKit.xcframework.zip.sha256"
 swift package compute-checksum "$ZIP_PATH" > "$DIST_ROOT/ColmapKit.xcframework.zip.swiftpm-checksum"
 
 SOURCE_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+SOURCE_PATCH_SHA256="$(git -C "$ROOT_DIR" diff --binary HEAD | shasum -a 256 | awk '{ print $1 }')"
 FRAMEWORK_SIZE_BYTES="$(du -sk "$XCFRAMEWORK_PATH" | awk '{ print $1 * 1024 }')"
 ZIP_SIZE_BYTES="$(stat -f '%z' "$ZIP_PATH")"
 ZIP_SHA256="$(awk '{ print $1 }' "$DIST_ROOT/ColmapKit.xcframework.zip.sha256")"
@@ -328,6 +329,8 @@ SWIFTPM_CHECKSUM="$(tr -d '\n' < "$DIST_ROOT/ColmapKit.xcframework.zip.swiftpm-c
 
 cat > "$DIST_ROOT/artifact-summary.txt" <<SUMMARY
 source_commit=$SOURCE_COMMIT
+source_revision=${COLMAPKIT_SOURCE_REVISION:-$SOURCE_COMMIT}
+source_patch_sha256=$SOURCE_PATCH_SHA256
 xcframework=$XCFRAMEWORK_PATH
 framework_size_bytes=$FRAMEWORK_SIZE_BYTES
 zip=$ZIP_PATH

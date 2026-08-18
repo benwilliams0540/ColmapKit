@@ -36,9 +36,12 @@
 #include "colmap/feature/resources.h"
 #include "colmap/util/cache.h"
 
+#include <memory>
 #include <string>
 
 namespace colmap {
+
+struct MetalRuntimeTelemetry;
 
 struct SiftExtractionOptions {
   // Maximum number of features to detect, keeping larger-scale features.
@@ -76,6 +79,12 @@ struct SiftExtractionOptions {
   // Whether to use the Apple Metal SIFT extractor when GPU extraction is
   // enabled. Unsupported SIFT modes fall back to the CPU extractor.
   bool use_metal = false;
+
+  // Fail rather than selecting a CPU extractor when Metal was explicitly
+  // required. Legacy callers leave this false.
+  bool require_metal = false;
+
+  std::shared_ptr<MetalRuntimeTelemetry> metal_runtime_telemetry;
 
   // Domain-size pooling parameters. Domain-size pooling computes an average
   // SIFT descriptor across multiple scales around the detected scale. This was
@@ -152,6 +161,11 @@ struct SiftMatchingOptions {
   // Whether to use the Apple Metal descriptor matcher for SIFT brute-force
   // matching. Guided matching currently falls back to the CPU brute-force path.
   bool use_metal = false;
+
+  // Fail rather than using deterministic CPU fallback when Metal is required.
+  bool require_metal = false;
+
+  std::shared_ptr<MetalRuntimeTelemetry> metal_runtime_telemetry;
 
   // Cache for reusing descriptor index for feature matching.
   ThreadSafeLRUCache<image_t, FeatureDescriptorIndex>*

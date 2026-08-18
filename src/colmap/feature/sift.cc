@@ -60,6 +60,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #include <Eigen/Geometry>
@@ -838,8 +839,18 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
     const int max_image_size = options.EffMaxImageSize();
     if (!extractor->extractor_.Init(
             metal_options, max_image_size, max_image_size)) {
-      LogSiftMetalStatus(extractor->extractor_.LastStatus());
+      const sift_metal::StatusReport& status =
+          extractor->extractor_.LastStatus();
+      LogSiftMetalStatus(status);
+      if (options.sift->metal_runtime_telemetry != nullptr) {
+        options.sift->metal_runtime_telemetry->RecordSiftExtraction(
+            false, status.device_name, status.message);
+      }
       return nullptr;
+    }
+    if (options.sift->metal_runtime_telemetry != nullptr) {
+      options.sift->metal_runtime_telemetry->RecordDeviceName(
+          extractor->extractor_.LastStatus().device_name);
     }
 
     return extractor;
@@ -857,8 +868,17 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
                             bitmap.Width(),
                             bitmap.Height(),
                             &metal_result)) {
-      LogSiftMetalStatus(extractor_.LastStatus());
+      const sift_metal::StatusReport& status = extractor_.LastStatus();
+      LogSiftMetalStatus(status);
+      if (options_.sift->metal_runtime_telemetry != nullptr) {
+        options_.sift->metal_runtime_telemetry->RecordSiftExtraction(
+            false, status.device_name, status.message);
+      }
       return false;
+    }
+    if (options_.sift->metal_runtime_telemetry != nullptr) {
+      options_.sift->metal_runtime_telemetry->RecordSiftExtraction(
+          true, metal_result.status.device_name);
     }
 
     const size_t num_features = metal_result.keypoints.size();
@@ -911,7 +931,15 @@ std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
     const FeatureExtractionOptions& options) {
   if (RequiresCovariantSiftExtractor(*options.sift)) {
     if (options.use_gpu && options.sift->use_metal) {
-      LOG(WARNING) << DescribeMetalSiftFallback(*options.sift);
+      const std::string fallback = DescribeMetalSiftFallback(*options.sift);
+      LOG(WARNING) << fallback;
+      if (options.sift->require_metal) {
+        return nullptr;
+      }
+      if (options.sift->metal_runtime_telemetry != nullptr) {
+        options.sift->metal_runtime_telemetry->RecordSiftExtraction(
+            false, {}, fallback);
+      }
     }
     LOG(INFO) << "Creating Covariant SIFT CPU feature extractor";
     return CovariantSiftCPUFeatureExtractor::Create(options);
@@ -1425,6 +1453,8 @@ MetalSiftMatchingOptions CreateMetalSiftMatchingOptions(
       SiftNormalizedDistanceToSquaredL2(options.max_distance);
   metal_options.cross_check = options.cross_check;
   metal_options.use_metal = true;
+  metal_options.require_metal = options.require_metal;
+  metal_options.runtime_telemetry = options.metal_runtime_telemetry;
   return metal_options;
 }
 
@@ -1460,6 +1490,10 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
                    const Image& image1,
                    const Image& image2,
                    TwoViewGeometry* two_view_geometry) override {
+    if (options_.sift->require_metal) {
+      throw std::runtime_error(
+          "Metal SIFT guided matching was required but is not implemented.");
+    }
     static std::once_flag warning_once;
     std::call_once(warning_once, [] {
       LOG(WARNING) << "Metal SIFT guided matching is not implemented yet; "

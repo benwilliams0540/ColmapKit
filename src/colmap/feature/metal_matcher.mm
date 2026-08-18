@@ -219,6 +219,18 @@ bool IsMetalSiftMatcherAvailable() {
   }
 }
 
+std::string GetMetalSiftMatcherDeviceName() {
+  @autoreleasepool {
+    MetalSiftKernel& kernel = SharedMetalSiftKernel();
+    if (kernel.device == nil) {
+      return {};
+    }
+    NSString* name = [kernel.device name];
+    const char* utf8 = name == nil ? nullptr : [name UTF8String];
+    return utf8 == nullptr ? std::string() : std::string(utf8);
+  }
+}
+
 bool ComputeMetalSiftTop2Matches(const FeatureDescriptors& query_descriptors,
                                  const FeatureDescriptors& train_descriptors,
                                  std::vector<MetalSiftTop2Match>* top2_matches) {
@@ -284,7 +296,7 @@ bool ComputeMetalSiftTop2Matches(const FeatureDescriptors& query_descriptors,
     const NSUInteger num_threadgroups =
         (num_query_descriptors + threadgroup_size - 1) / threadgroup_size;
     [encoder dispatchThreadgroups:MTLSizeMake(num_threadgroups, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
+            threadsPerThreadgroup:MTLSizeMake(threadgroup_size, 1, 1)];
     [encoder endEncoding];
 
     [command_buffer commit];

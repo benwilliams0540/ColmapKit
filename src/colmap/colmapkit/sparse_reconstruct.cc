@@ -27,9 +27,15 @@ void PrintUsage(const char* argv0) {
       << " [--matcher sequential|exhaustive|spatial]"
       << " [--sequential_overlap N]"
       << " [--num_threads N]"
+      << " [--extraction_num_threads N]"
+      << " [--matching_num_threads N]"
+      << " [--mapper_num_threads N]"
       << " [--mapper_random_seed N]"
       << " [--use_metal_matching 0|1]"
       << " [--use_metal_sift 0|1]"
+      << " [--require_metal_matching 0|1]"
+      << " [--require_metal_sift 0|1]"
+      << " [--evidence_path FILE]"
       << " [--cancel_after_first_progress 0|1]\n";
 }
 
@@ -165,21 +171,28 @@ int main(int argc, char** argv) {
         OptionalInt(args, "mapper_min_model_size", -1);
     config.mapper_random_seed = OptionalInt(args, "mapper_random_seed", 0);
     config.write_sparse_text = OptionalInt(args, "write_sparse_text", 1);
+    config.extraction_num_threads =
+        OptionalInt(args, "extraction_num_threads", 0);
+    config.matching_num_threads = OptionalInt(args, "matching_num_threads", 0);
+    config.mapper_num_threads = OptionalInt(args, "mapper_num_threads", 0);
+    config.require_metal_sift = OptionalInt(args, "require_metal_sift", 0);
+    config.require_metal_matching =
+        OptionalInt(args, "require_metal_matching", 0);
+    config.evidence_path = OptionalCString(args, "evidence_path");
     ProgressState progress_state;
     config.progress_callback = ProgressCallback;
     config.progress_user_data = &progress_state;
 
     ColmapKitSparseReconstructionResult result = {};
     result.struct_size = sizeof(result);
+    const bool cancel_after_first_progress =
+        OptionalInt(args, "cancel_after_first_progress", 0) != 0;
     ColmapKitSparseReconstructionJob* job = nullptr;
     ColmapKitStatus status = ColmapKitStartSparseReconstruction(&config, &job);
     if (status != COLMAPKIT_STATUS_OK) {
       std::cerr << "Failed to start ColmapKit job: " << status << '\n';
       return EXIT_FAILURE;
     }
-
-    const bool cancel_after_first_progress =
-        OptionalInt(args, "cancel_after_first_progress", 0) != 0;
     if (cancel_after_first_progress) {
       std::unique_lock<std::mutex> lock(progress_state.mutex);
       progress_state.condition.wait_for(lock, std::chrono::seconds(30), [&]() {
@@ -187,7 +200,6 @@ int main(int argc, char** argv) {
       });
       ColmapKitCancelSparseReconstruction(job);
     }
-
     status = ColmapKitWaitSparseReconstruction(job, &result);
     ColmapKitReleaseSparseReconstructionJob(job);
     if (cancel_after_first_progress && status == COLMAPKIT_STATUS_CANCELLED) {
@@ -200,6 +212,25 @@ int main(int argc, char** argv) {
     }
 
     std::cout << result.message << '\n';
+    if (result.sparse_reconstruction_abi_version >= 2) {
+      std::cout << "[ColmapKit evidence]"
+                << " abi=" << result.sparse_reconstruction_abi_version
+                << " extraction_threads="
+                << result.effective_extraction_num_threads
+                << " matching_threads=" << result.effective_matching_num_threads
+                << " geometric_verification_threads="
+                << result.effective_geometric_verification_num_threads
+                << " mapper_threads=" << result.effective_mapper_num_threads
+                << " metal_sift_operations=" << result.metal_sift_operations
+                << " metal_matching_operations="
+                << result.metal_matching_operations
+                << " metal_sift_fallbacks=" << result.metal_sift_fallbacks
+                << " metal_matching_fallbacks="
+                << result.metal_matching_fallbacks
+                << " total_seconds=" << result.total_seconds
+                << " peak_resident_bytes=" << result.peak_resident_memory_bytes
+                << '\n';
+    }
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

@@ -31,9 +31,13 @@
 
 #include "colmap/feature/types.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 namespace colmap {
@@ -81,10 +85,50 @@ struct MetalSiftMatchingOptions {
   // the deterministic CPU fallback.
   bool use_metal = true;
 
+  // Fail the operation instead of falling back when Metal is unavailable or a
+  // command buffer fails. Legacy callers leave this false.
+  bool require_metal = false;
+
+  std::shared_ptr<struct MetalRuntimeTelemetry> runtime_telemetry;
+
   bool Check() const;
 };
 
+struct MetalRuntimeTelemetrySnapshot {
+  uint64_t sift_extraction_operations = 0;
+  uint64_t sift_extraction_failures = 0;
+  uint64_t sift_matching_operations = 0;
+  uint64_t sift_matching_fallbacks = 0;
+  std::string device_name;
+  std::string last_failure;
+};
+
+// Run-scoped telemetry shared by facade options and controller worker copies.
+// It is intentionally opt-in so ordinary COLMAP and legacy ColmapKit callers
+// do not pay for or observe it.
+struct MetalRuntimeTelemetry {
+  void RecordDeviceName(const std::string& value);
+  void RecordSiftExtraction(bool succeeded,
+                            const std::string& device,
+                            const std::string& failure = {});
+  void RecordSiftMatching(bool used_metal,
+                          const std::string& device,
+                          const std::string& failure = {});
+  MetalRuntimeTelemetrySnapshot Snapshot() const;
+
+ private:
+  std::atomic<uint64_t> sift_extraction_operations_{0};
+  std::atomic<uint64_t> sift_extraction_failures_{0};
+  std::atomic<uint64_t> sift_matching_operations_{0};
+  std::atomic<uint64_t> sift_matching_fallbacks_{0};
+  mutable std::mutex strings_mutex_;
+  std::string device_name_;
+  std::string last_failure_;
+};
+
 bool IsMetalSiftMatcherAvailable();
+
+std::string GetMetalSiftMatcherDeviceName();
 
 std::vector<MetalSiftTop2Match> ComputeSiftTop2MatchesCPU(
     const FeatureDescriptors& query_descriptors,
