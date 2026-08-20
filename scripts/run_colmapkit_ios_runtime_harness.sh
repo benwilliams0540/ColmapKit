@@ -28,6 +28,7 @@ if [[ -n "$FIXTURE_IMAGE_DIR" ]]; then
     echo "error: Runtime fixture directory does not exist: $FIXTURE_IMAGE_DIR" >&2
     exit 1
   fi
+  ditto "$FIXTURE_IMAGE_DIR" "$APP_PATH/StrictFixture"
   ditto "$FIXTURE_IMAGE_DIR" "$APP_PATH/Fixture"
 else
   python3 "$ROOT_DIR/scripts/python/colmapkit_compare.py" \
@@ -35,6 +36,7 @@ else
     --generate-synthetic-fixture \
     --generate-only \
     --fixture-image-count 8
+  ditto "$FIXTURE_RUN_ROOT/fixture/images" "$APP_PATH/StrictFixture"
   for fixture_image in "$FIXTURE_RUN_ROOT"/fixture/images/*.pgm; do
     sips --flip vertical "$fixture_image" >/dev/null
   done

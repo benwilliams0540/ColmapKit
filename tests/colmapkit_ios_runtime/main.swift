@@ -45,6 +45,33 @@ private struct RuntimeResult: Codable {
   var priorV2DensificationRatio: Double
   var priorV2PoseUnchanged: Bool
   var priorV2PLYValidated: Bool
+  var thermalStateStart: String
+  var thermalStateEnd: String
+  var strictMetalCases: [StrictMetalRuntimeResult]
+}
+
+private struct StrictMetalRuntimeResult: Codable {
+  var label: String
+  var status: UInt32
+  var reconstructionSucceeded: Bool
+  var failureMessage: String
+  var registeredImages: Int
+  var sparsePoints: Int
+  var observations: Int
+  var noFallbackSatisfied: Bool
+  var extractionBackend: UInt32
+  var matchingBackend: UInt32
+  var extractionThreads: Int
+  var matchingThreads: Int
+  var mapperThreads: Int
+  var metalDeviceName: String
+  var metalSiftOperations: UInt64
+  var metalMatchingOperations: UInt64
+  var metalSiftFallbacks: UInt64
+  var metalMatchingFallbacks: UInt64
+  var evidenceReadable: Bool
+  var totalSeconds: Double
+  var peakResidentMemoryBytes: UInt64
 }
 
 private struct V2RuntimeResult {
@@ -136,9 +163,21 @@ private enum ColmapKitRuntimeHarness {
     guard isSuccess(initializeStatus) else {
       throw HarnessError.failed("ColmapKitInitialize failed with \(initializeStatus.rawValue).")
     }
+    let thermalStateStart = thermalStateName(ProcessInfo.processInfo.thermalState)
+    guard thermalStateStart == "nominal" else {
+      throw HarnessError.failed(
+        "Refusing to start runtime work at thermal state \(thermalStateStart)."
+      )
+    }
 
     guard let fixtureURL = Bundle.main.url(forResource: "Fixture", withExtension: nil) else {
       throw HarnessError.failed("The deterministic fixture is missing from the app bundle.")
+    }
+    guard let strictFixtureURL = Bundle.main.url(
+      forResource: "StrictFixture",
+      withExtension: nil
+    ) else {
+      throw HarnessError.failed("The strict Metal fixture is missing from the app bundle.")
     }
     let fixtureImageCount = try FileManager.default.contentsOfDirectory(atPath: fixtureURL.path).count
     guard fixtureImageCount >= 3 else {
@@ -195,6 +234,10 @@ private enum ColmapKitRuntimeHarness {
       fixtureURL: fixtureURL,
       rootURL: runRoot.appendingPathComponent("v2", isDirectory: true)
     )
+    let strictMetalCases = try runStrictMetalMatrix(
+      fixtureURL: strictFixtureURL,
+      rootURL: runRoot.appendingPathComponent("strict-metal", isDirectory: true)
+    )
 
     return RuntimeResult(
       version: version,
@@ -236,8 +279,136 @@ private enum ColmapKitRuntimeHarness {
       priorV2OutputGaussians: v2.outputGaussians,
       priorV2DensificationRatio: v2.densificationRatio,
       priorV2PoseUnchanged: v2.poseUnchanged,
-      priorV2PLYValidated: v2.plyValidated
+      priorV2PLYValidated: v2.plyValidated,
+      thermalStateStart: thermalStateStart,
+      thermalStateEnd: thermalStateName(ProcessInfo.processInfo.thermalState),
+      strictMetalCases: strictMetalCases
     )
+  }
+
+  private static func runStrictMetalMatrix(
+    fixtureURL: URL,
+    rootURL: URL
+  ) throws -> [StrictMetalRuntimeResult] {
+    let cases = [
+      (label: "metal-sift", sift: true, matching: false),
+      (label: "metal-matching", sift: false, matching: true),
+      (label: "metal-combined", sift: true, matching: true),
+    ]
+    return try cases.map { testCase in
+      let caseRoot = rootURL.appendingPathComponent(testCase.label, isDirectory: true)
+      try FileManager.default.createDirectory(at: caseRoot, withIntermediateDirectories: true)
+      let databaseURL = caseRoot.appendingPathComponent("database.db")
+      let sparseURL = caseRoot.appendingPathComponent("sparse", isDirectory: true)
+      let evidenceURL = caseRoot.appendingPathComponent("evidence.json")
+
+      var result = ColmapKitSparseReconstructionResult()
+      result.struct_size = MemoryLayout<ColmapKitSparseReconstructionResult>.size
+      let status = fixtureURL.path.withCString { imagePath in
+        databaseURL.path.withCString { databasePath in
+          sparseURL.path.withCString { outputPath in
+            evidenceURL.path.withCString { evidencePath in
+              "SIMPLE_PINHOLE".withCString { cameraModel in
+                "900,512,384".withCString { cameraParams in
+                  var config = ColmapKitSparseReconstructionConfig(
+                    struct_size: MemoryLayout<ColmapKitSparseReconstructionConfig>.size,
+                    database_path: databasePath,
+                    image_path: imagePath,
+                    output_path: outputPath,
+                    sparse_text_output_path: nil,
+                    image_list_path: nil,
+                    camera_model: cameraModel,
+                    camera_params: cameraParams,
+                    single_camera: 1,
+                    max_image_size: 480,
+                    num_threads: 4,
+                    use_gpu: 0,
+                    use_metal_sift: testCase.sift ? 1 : 0,
+                    use_metal_matching: testCase.matching ? 1 : 0,
+                    estimate_affine_shape: 0,
+                    domain_size_pooling: 0,
+                    matcher: COLMAPKIT_MATCHER_SEQUENTIAL,
+                    sequential_overlap: 4,
+                    mapper_min_num_matches: 15,
+                    mapper_min_model_size: 2,
+                    mapper_random_seed: 0,
+                    write_sparse_text: 1,
+                    progress_callback: nil,
+                    progress_user_data: nil,
+                    extraction_num_threads: 4,
+                    matching_num_threads: 4,
+                    mapper_num_threads: 4,
+                    require_metal_sift: testCase.sift ? 1 : 0,
+                    require_metal_matching: testCase.matching ? 1 : 0,
+                    evidence_path: evidencePath
+                  )
+                  return ColmapKitRunSparseReconstruction(&config, &result)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      let expectedExtractionBackend = testCase.sift
+        ? COLMAPKIT_COMPUTE_BACKEND_METAL : COLMAPKIT_COMPUTE_BACKEND_CPU
+      let expectedMatchingBackend = testCase.matching
+        ? COLMAPKIT_COMPUTE_BACKEND_METAL : COLMAPKIT_COMPUTE_BACKEND_CPU
+      let metalDeviceName = fixedCString(&result.metal_device_name)
+      let failureMessage = message(from: result)
+      let evidenceReadable = FileManager.default.fileExists(atPath: evidenceURL.path)
+      let evidence = evidenceReadable ? try jsonDictionary(at: evidenceURL) : [:]
+      let evidenceMetal = evidence["metal"] as? [String: Any]
+      let evidenceStrict = evidence["strict"] as? [String: Any]
+      guard status.rawValue == result.status.rawValue,
+            result.no_fallback_satisfied == 1,
+            result.extraction_backend == expectedExtractionBackend,
+            result.matching_backend == expectedMatchingBackend,
+            (result.metal_sift_operations > 0) == testCase.sift,
+            (result.metal_matching_operations > 0) == testCase.matching,
+            result.metal_sift_fallbacks == 0,
+            result.metal_matching_fallbacks == 0,
+            !metalDeviceName.isEmpty,
+            evidenceReadable,
+            evidence["status"] as? Int == Int(result.status.rawValue),
+            evidenceStrict?["noFallbackSatisfied"] as? Bool == true,
+            evidenceMetal?["siftDispatchCount"] as? Int
+              == Int(result.metal_sift_operations),
+            evidenceMetal?["matchingDispatchCount"] as? Int
+              == Int(result.metal_matching_operations),
+            evidenceMetal?["siftFallbackCount"] as? Int == 0,
+            evidenceMetal?["matchingFallbackCount"] as? Int == 0
+      else {
+        throw HarnessError.failed(
+          "Strict \(testCase.label) failed: status=\(status.rawValue), "
+            + "result=\(result.status.rawValue), message=\(failureMessage)"
+        )
+      }
+
+      return StrictMetalRuntimeResult(
+        label: testCase.label,
+        status: result.status.rawValue,
+        reconstructionSucceeded: isSuccess(result.status),
+        failureMessage: isSuccess(result.status) ? "" : failureMessage,
+        registeredImages: Int(result.registered_images),
+        sparsePoints: Int(result.sparse_points),
+        observations: Int(result.observations),
+        noFallbackSatisfied: result.no_fallback_satisfied == 1,
+        extractionBackend: result.extraction_backend.rawValue,
+        matchingBackend: result.matching_backend.rawValue,
+        extractionThreads: Int(result.effective_extraction_num_threads),
+        matchingThreads: Int(result.effective_matching_num_threads),
+        mapperThreads: Int(result.effective_mapper_num_threads),
+        metalDeviceName: metalDeviceName,
+        metalSiftOperations: result.metal_sift_operations,
+        metalMatchingOperations: result.metal_matching_operations,
+        metalSiftFallbacks: result.metal_sift_fallbacks,
+        metalMatchingFallbacks: result.metal_matching_fallbacks,
+        evidenceReadable: evidenceReadable,
+        totalSeconds: result.total_seconds,
+        peakResidentMemoryBytes: result.peak_resident_memory_bytes
+      )
+    }
   }
 
   private static func runV2(fixtureURL: URL, rootURL: URL) throws -> V2RuntimeResult {
@@ -961,6 +1132,16 @@ private enum ColmapKitRuntimeHarness {
 
   private static func isCancelled(_ status: ColmapKitStatus) -> Bool {
     status.rawValue == COLMAPKIT_STATUS_CANCELLED.rawValue
+  }
+
+  private static func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
+    switch state {
+    case .nominal: return "nominal"
+    case .fair: return "fair"
+    case .serious: return "serious"
+    case .critical: return "critical"
+    @unknown default: return "unknown"
+    }
   }
 }
 
