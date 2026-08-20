@@ -12,6 +12,7 @@ ZIP_PATH="$DIST_ROOT/ColmapKit.xcframework.zip"
 AUDIT_ROOT="$DIST_ROOT/audits"
 MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-15.0}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
+SIFT_METAL_ENABLED="${SIFT_METAL_ENABLED:-OFF}"
 COLMAPKIT_BUILD_MACOS="${COLMAPKIT_BUILD_MACOS:-ON}"
 COLMAPKIT_BUILD_IOS="${COLMAPKIT_BUILD_IOS:-ON}"
 COLMAPKIT_BUILD_LIBOMP="${COLMAPKIT_BUILD_LIBOMP:-ON}"
@@ -85,6 +86,7 @@ if [[ "$COLMAPKIT_BUILD_MACOS" == "ON" ]]; then
     COLMAPKIT_VCPKG_OVERLAY_TRIPLETS="$ROOT_DIR/cmake/vcpkg-triplets" \
     COLMAPKIT_IGNORE_PREFIXES='/opt/homebrew;/usr/local;/opt/anaconda3' \
     LIBOMP_ROOT="$LIBOMP_ROOT" \
+    SIFT_METAL_ENABLED="$SIFT_METAL_ENABLED" \
     X_VCPKG_REGISTRIES_CACHE="$VCPKG_REGISTRIES_CACHE" \
     VCPKG_DEFAULT_BINARY_CACHE="$VCPKG_BINARY_CACHE" \
     bash "$ROOT_DIR/scripts/build_colmapkit_xcframework.sh"
@@ -99,6 +101,7 @@ if [[ "$COLMAPKIT_BUILD_IOS" == "ON" ]]; then
     COLMAPKIT_IOS_DIST_ROOT="$IOS_PROBE_ROOT" \
     COLMAPKIT_IOS_PACKAGE_ROOT="$IOS_PACKAGE_ROOT" \
     IOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+    SIFT_METAL_ENABLED="$SIFT_METAL_ENABLED" \
     COLMAPKIT_VCPKG_ROOT="$COLMAPKIT_VCPKG_ROOT" \
     COLMAPKIT_CMAKE_TOOLCHAIN_FILE="$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" \
     COLMAPKIT_CMAKE_MAKE_PROGRAM="$COLMAPKIT_CMAKE_MAKE_PROGRAM" \
@@ -192,6 +195,17 @@ audit_framework() {
     exit 1
   fi
 
+  local metallib
+  metallib="$(find "$framework" -type f -name sift.metallib -print -quit)"
+  if [[ "$SIFT_METAL_ENABLED" == "ON" && -z "$metallib" ]]; then
+    echo "error: $label is missing the packaged SiftMetal library." >&2
+    exit 1
+  fi
+  if [[ "$SIFT_METAL_ENABLED" != "ON" && -n "$metallib" ]]; then
+    echo "error: $label unexpectedly contains a SiftMetal library." >&2
+    exit 1
+  fi
+
   {
     printf '# %s\n\n' "$label"
     printf '## plist\n'
@@ -208,6 +222,11 @@ audit_framework() {
     printf '\n## codesign\n'
     codesign --display --verbose=4 "$framework"
     codesign --verify --deep --strict --verbose=2 "$framework"
+    if [[ -n "$metallib" ]]; then
+      printf '\n## SiftMetal library\n'
+      file "$metallib"
+      shasum -a 256 "$metallib"
+    fi
   } > "$audit_path" 2>&1
 
   if ! grep -Fq "platform $expected_platform" "$audit_path" ||
@@ -340,6 +359,7 @@ swiftpm_checksum=$SWIFTPM_CHECKSUM
 slices=macos-arm64,ios-arm64,ios-arm64-simulator
 macos_deployment_target=$MACOS_DEPLOYMENT_TARGET
 ios_deployment_target=$IOS_DEPLOYMENT_TARGET
+sift_metal_enabled=$SIFT_METAL_ENABLED
 SUMMARY
 
 echo "Created $XCFRAMEWORK_PATH"

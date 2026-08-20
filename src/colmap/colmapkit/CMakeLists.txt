@@ -68,6 +68,20 @@ if(COLMAPKIT_FRAMEWORK_ENABLED)
         ${COLMAPKIT_PUBLIC_LINK_LIBS}
         ${COLMAPKIT_PRIVATE_LINK_LIBS}
     )
+    if(SIFT_METAL_ENABLED)
+        get_property(COLMAPKIT_SIFT_METALLIB GLOBAL PROPERTY
+                     COLMAP_SIFT_METAL_METALLIB)
+        if(NOT COLMAPKIT_SIFT_METALLIB)
+            message(FATAL_ERROR
+                "SIFT_METAL_ENABLED requires a generated sift.metallib")
+        endif()
+        set_source_files_properties("${COLMAPKIT_SIFT_METALLIB}" PROPERTIES
+            GENERATED TRUE
+            MACOSX_PACKAGE_LOCATION Resources
+        )
+        target_sources(ColmapKit PRIVATE "${COLMAPKIT_SIFT_METALLIB}")
+        add_dependencies(ColmapKit colmap_sift_metal_metallib)
+    endif()
     add_custom_command(TARGET ColmapKit POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_DIR:ColmapKit>/Modules"

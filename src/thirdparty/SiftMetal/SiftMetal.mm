@@ -26,6 +26,7 @@
 #include "include/SIFTExtrema.h"
 #include "include/SIFTInterpolate.h"
 #include "include/SIFTOrientation.h"
+#include <dlfcn.h>
 #include <mach-o/dyld.h>
 
 // Build-tree path to compiled metallib is set by CMake and used as one of
@@ -132,6 +133,24 @@ static std::vector<std::string> MetallibCandidatePaths() {
           &paths,
           [resourcePath stringByAppendingPathComponent:@"../share/colmap/metal/sift.metallib"]);
     }
+  }
+
+  Dl_info image_info = {};
+  if (dladdr(reinterpret_cast<const void*>(&MetallibCandidatePaths),
+             &image_info) != 0 &&
+      image_info.dli_fname != nullptr) {
+    NSString* imagePath = [[NSFileManager defaultManager]
+        stringWithFileSystemRepresentation:image_info.dli_fname
+                                    length:std::strlen(image_info.dli_fname)];
+    NSString* imageDir = [imagePath stringByDeletingLastPathComponent];
+    AppendPath(&paths,
+               [imageDir stringByAppendingPathComponent:@"sift.metallib"]);
+    AppendPath(
+        &paths,
+        [imageDir stringByAppendingPathComponent:@"Resources/sift.metallib"]);
+    AppendPath(
+        &paths,
+        [imageDir stringByAppendingPathComponent:@"../Resources/sift.metallib"]);
   }
 
   uint32_t executable_path_size = 0;

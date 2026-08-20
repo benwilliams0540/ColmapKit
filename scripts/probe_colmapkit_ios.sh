@@ -8,6 +8,7 @@ PACKAGE_ROOT="${COLMAPKIT_IOS_PACKAGE_ROOT:-"$ROOT_DIR/dist/colmapkit-ios"}"
 XCFRAMEWORK_PATH="$PACKAGE_ROOT/ColmapKit.xcframework"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
+SIFT_METAL_ENABLED="${SIFT_METAL_ENABLED:-OFF}"
 COLMAPKIT_CLEAN="${COLMAPKIT_CLEAN:-ON}"
 COLMAPKIT_IOS_STRICT_DEPS="${COLMAPKIT_IOS_STRICT_DEPS:-ON}"
 COLMAPKIT_IOS_BUILD="${COLMAPKIT_IOS_BUILD:-ON}"
@@ -69,6 +70,7 @@ Settings:
 - vcpkg overlay triplets: ${COLMAPKIT_VCPKG_OVERLAY_TRIPLETS:-unset}
 - vcpkg overlay ports: ${COLMAPKIT_VCPKG_OVERLAY_PORTS:-unset}
 - vcpkg default manifest features disabled: $COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES
+- SiftMetal compiled and packaged: $SIFT_METAL_ENABLED
 
 SUMMARY
 
@@ -135,7 +137,7 @@ run_slice() {
     -DTESTS_ENABLED=OFF
     -DOPENMP_ENABLED=OFF
     -DMETAL_ENABLED=ON
-    -DSIFT_METAL_ENABLED=OFF
+    -DSIFT_METAL_ENABLED="$SIFT_METAL_ENABLED"
     -DBUILD_SHARED_LIBS=OFF
   )
 
@@ -234,12 +236,22 @@ audit_framework() {
   local framework="$2"
   local expected_platform="$3"
   local binary="$framework/ColmapKit"
+  local metallib
+  metallib="$(find "$framework" -type f -name sift.metallib -print -quit)"
 
   if [[ ! -f "$binary" ||
         ! -f "$framework/Headers/colmapkit.h" ||
         ! -f "$framework/Modules/module.modulemap" ||
         ! -f "$framework/Info.plist" ]]; then
     append_summary "- $label audit: failed (framework bundle is incomplete)"
+    return 1
+  fi
+  if [[ "$SIFT_METAL_ENABLED" == "ON" && -z "$metallib" ]]; then
+    append_summary "- $label audit: failed (packaged sift.metallib is missing)"
+    return 1
+  fi
+  if [[ "$SIFT_METAL_ENABLED" != "ON" && -n "$metallib" ]]; then
+    append_summary "- $label audit: failed (unexpected sift.metallib)"
     return 1
   fi
 
@@ -326,6 +338,11 @@ audit_framework() {
     printf '%s\n\n' "$build_output"
     printf '%s\n\n' "$linkage_output"
     printf '%s\n' "$symbols_output"
+    if [[ -n "$metallib" ]]; then
+      printf '\nSiftMetal library:\n'
+      file "$metallib"
+      shasum -a 256 "$metallib"
+    fi
   } >> "$PACKAGE_ROOT/framework-audit.txt"
 
   append_summary "- $label audit: passed"

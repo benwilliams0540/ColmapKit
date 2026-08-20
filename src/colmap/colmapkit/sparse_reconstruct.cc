@@ -24,6 +24,7 @@ void PrintUsage(const char* argv0) {
       << " [--sparse_text_output_path SPARSE_TEXT]"
       << " [--image_list_path LIST]"
       << " [--camera_model SIMPLE_RADIAL]"
+      << " [--max_image_size N]"
       << " [--matcher sequential|exhaustive|spatial]"
       << " [--sequential_overlap N]"
       << " [--num_threads N]"

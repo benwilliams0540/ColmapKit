@@ -5,6 +5,26 @@ set(SIFT_METAL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(SIFT_METAL_METALLIB "${CMAKE_CURRENT_BINARY_DIR}/sift.metallib")
 set(SIFT_METAL_MODULE_CACHE_DIR "${CMAKE_CURRENT_BINARY_DIR}/metal-module-cache")
 
+set(SIFT_METAL_COMPILE_FLAGS)
+if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        if(CMAKE_OSX_SYSROOT MATCHES "iPhoneSimulator")
+            set(SIFT_METAL_AIR_TARGET
+                "air64-apple-ios${CMAKE_OSX_DEPLOYMENT_TARGET}-simulator")
+        else()
+            set(SIFT_METAL_AIR_TARGET
+                "air64-apple-ios${CMAKE_OSX_DEPLOYMENT_TARGET}")
+        endif()
+    else()
+        set(SIFT_METAL_AIR_TARGET
+            "air64-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    endif()
+    list(APPEND SIFT_METAL_COMPILE_FLAGS -target ${SIFT_METAL_AIR_TARGET})
+endif()
+if(IS_ABSOLUTE "${CMAKE_OSX_SYSROOT}")
+    list(APPEND SIFT_METAL_COMPILE_FLAGS -isysroot ${CMAKE_OSX_SYSROOT})
+endif()
+
 find_program(XCRUN_EXECUTABLE xcrun)
 find_program(METAL_EXECUTABLE metal)
 find_program(METALLIB_EXECUTABLE metallib)
@@ -40,6 +60,7 @@ endif()
 if(NOT METALLIB_EXECUTABLE)
     set(SIFT_METAL_LINKER_EXECUTABLE "${METAL_EXECUTABLE}")
     set(SIFT_METAL_LINKER_FLAGS
+        ${SIFT_METAL_COMPILE_FLAGS}
         "-fmodules-cache-path=${SIFT_METAL_MODULE_CACHE_DIR}"
     )
     message(STATUS
@@ -83,6 +104,7 @@ foreach(SHADER ${METAL_SHADERS})
         OUTPUT ${AIR_FILE}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SIFT_METAL_MODULE_CACHE_DIR}
         COMMAND ${METAL_EXECUTABLE}
+            ${SIFT_METAL_COMPILE_FLAGS}
             -c ${SHADER}
             -o ${AIR_FILE}
             -I ${SIFT_METAL_INCLUDE_DIR}
@@ -107,6 +129,8 @@ add_custom_command(
 )
 
 add_custom_target(colmap_sift_metal_metallib DEPENDS ${SIFT_METAL_METALLIB})
+set_property(GLOBAL PROPERTY COLMAP_SIFT_METAL_METALLIB
+             "${SIFT_METAL_METALLIB}")
 
 COLMAP_ADD_LIBRARY(
     NAME colmap_sift_metal
