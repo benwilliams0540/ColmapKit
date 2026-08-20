@@ -1671,7 +1671,12 @@ std::string GeometryDiagnosticsJSON(
   }
   out << "    ],\n    \"post_ba_anomalies\": [\n";
   if (!snapshots.empty()) {
-    const auto& final = snapshots.back();
+    const auto anomaly_snapshot = std::find_if(
+        snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
+          return snapshot.stage == "post_bundle_adjustment";
+        });
+    const auto& final = anomaly_snapshot == snapshots.end() ? snapshots.back()
+                                                            : *anomaly_snapshot;
     bool first_anomaly = true;
     std::unordered_map<colmap::image_t, uint32_t> input_by_image_id;
     for (uint32_t i = 0; i < image_ids.size(); ++i) {
@@ -1978,6 +1983,9 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     const bool geometry_diagnostics_enabled =
         (config.flags & COLMAPKIT_TRACKED_POSE_FLAG_V2_GEOMETRY_DIAGNOSTICS) !=
         0;
+    const bool post_ba_negative_depth_filter_enabled =
+        (config.flags &
+         COLMAPKIT_TRACKED_POSE_FLAG_V2_POST_BA_NEGATIVE_DEPTH_FILTER) != 0;
     const PairSelection pair_selection =
         BuildPairs(config, order, initial_poses);
     const auto& pairs = pair_selection.pairs;
@@ -2183,6 +2191,21 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
       geometry_diagnostic_snapshots.push_back(CaptureGeometryDiagnosticSnapshot(
           "post_bundle_adjustment", 0, reconstruction));
     }
+    size_t post_ba_negative_depth_filter_count = 0;
+    if (post_ba_negative_depth_filter_enabled) {
+      colmap::ObservationManager observation_manager(
+          reconstruction, cache->CorrespondenceGraph());
+      post_ba_negative_depth_filter_count =
+          observation_manager.FilterObservationsWithNegativeDepth();
+      reconstruction.UpdatePoint3DErrors();
+      if (geometry_diagnostics_enabled) {
+        geometry_diagnostic_snapshots.push_back(
+            CaptureGeometryDiagnosticSnapshot(
+                "after_post_ba_negative_depth_filter",
+                post_ba_negative_depth_filter_count,
+                reconstruction));
+      }
+    }
     local.bundle_adjustment_seconds = Seconds(Clock::now() - ba_start).count();
     local.final_mean_reprojection_error =
         reconstruction.ComputeMeanReprojectionError();
@@ -2285,6 +2308,10 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << local.initial_mean_reprojection_error << ",\n"
              << "  \"final_mean_reprojection_error\": "
              << local.final_mean_reprojection_error << ",\n"
+             << "  \"post_ba_negative_depth_filter\": {\"enabled\":"
+             << (post_ba_negative_depth_filter_enabled ? "true" : "false")
+             << ",\"reported_filtered_observations\":"
+             << post_ba_negative_depth_filter_count << "},\n"
              << "  \"max_translation_correction_meters\": "
              << local.max_translation_correction_meters << ",\n"
              << "  \"max_rotation_correction_degrees\": "
