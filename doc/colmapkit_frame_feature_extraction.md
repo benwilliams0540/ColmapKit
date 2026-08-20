@@ -133,7 +133,9 @@ revision and artifact; it does not overwrite the old path. Duplicate commit
 events may validate and reuse the exact same identity. Capture ordering is not
 part of extraction identity and is assigned only when sealing. Interrupted
 capture may leave a non-authoritative temporary name, never a valid completed
-artifact. Seal-time reconciliation and database import remain unimplemented.
+artifact. CaptureSeal reconciliation is implemented by the separate
+`FrameFeatureImportV1` operation described in
+`doc/colmapkit_frame_feature_import.md`.
 
 ## Local proof and remaining gates
 
@@ -144,8 +146,6 @@ nonfinite data, bounded admission, cancellation and temporary cleanup,
 single-job admission, zero-feature failure, and preexisting-output preservation.
 
 This source slice does not prove cross-device byte identity, Simulator or
-physical-device runtime, App Store packaging, Swift ergonomics, capture-time
-resource policy, or seal-time database reconciliation. The smallest next slice
-is a read-only importer/reconciler that validates all identities before assigning
-deterministic database image IDs; it must not silently re-extract or mix
-profiles.
+physical-device runtime, App Store packaging, Swift ergonomics, or capture-time
+resource policy. Its artifact contract is consumed by the separately versioned
+seal-time importer; extraction itself still performs no database work.

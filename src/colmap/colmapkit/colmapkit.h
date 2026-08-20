@@ -574,6 +574,106 @@ typedef struct ColmapKitFrameFeatureExtractorV1
     ColmapKitFrameFeatureExtractorV1;
 typedef struct ColmapKitFrameFeatureJobV1 ColmapKitFrameFeatureJobV1;
 
+// CaptureSeal feature import is a separate additive operation. Its atomic
+// output is a no-overwrite .ckseal directory containing database.db and
+// import-receipt.json.
+#define COLMAPKIT_FRAME_FEATURE_IMPORT_ABI_VERSION_V1 1u
+#define COLMAPKIT_FRAME_FEATURE_IMPORT_RECEIPT_SCHEMA_VERSION_V1 1u
+
+typedef enum ColmapKitFrameFeatureImportModeV1 {
+  COLMAPKIT_FRAME_FEATURE_IMPORT_MODE_V1_CREATE_NEW = 1,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_MODE_V1_COPY_EMPTY_BASE = 2
+} ColmapKitFrameFeatureImportModeV1;
+
+typedef enum ColmapKitFrameFeatureImportProgressStageV1 {
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_VALIDATING = 0,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_STAGING = 1,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_IMPORTING = 2,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_RECEIPT = 3,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_PUBLISHING = 4,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_FINISHED = 5,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_FAILED = 6,
+  COLMAPKIT_FRAME_FEATURE_IMPORT_PROGRESS_V1_CANCELLED = 7
+} ColmapKitFrameFeatureImportProgressStageV1;
+
+typedef struct ColmapKitFrameFeatureImportProgressEventV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t stage;
+  uint32_t reserved0;
+  double fraction;
+  double elapsed_seconds;
+  uint64_t current;
+  uint64_t total;
+  uint64_t admitted_memory_bytes;
+  const char* message;
+  const char* detail;
+} ColmapKitFrameFeatureImportProgressEventV1;
+
+typedef void (*ColmapKitFrameFeatureImportProgressCallbackV1)(
+    const ColmapKitFrameFeatureImportProgressEventV1* event, void* user_data);
+
+typedef struct ColmapKitFrameFeatureImportItemV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t stable_frame_id;
+  uint64_t frame_revision;
+  const char* image_name;
+  const char* image_path;
+  const char* artifact_path;
+  const char* expected_image_sha256;
+  const char* expected_metadata_sha256;
+  const char* expected_artifact_sha256;
+  uint32_t reserved[4];
+} ColmapKitFrameFeatureImportItemV1;
+
+typedef struct ColmapKitFrameFeatureImportConfigV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t mode;
+  uint32_t worker_count;
+  const ColmapKitFrameFeatureImportItemV1* items;
+  uint64_t num_items;
+  ColmapKitFrameFeatureExtractorConfigV1 extractor_config;
+  uint64_t max_total_artifact_bytes;
+  uint64_t max_total_image_bytes;
+  uint64_t max_total_features;
+  uint64_t max_base_database_bytes;
+  const char* output_bundle_path;
+  const char* base_database_path;
+  ColmapKitFrameFeatureImportProgressCallbackV1 progress_callback;
+  void* progress_user_data;
+  uint32_t reserved[4];
+} ColmapKitFrameFeatureImportConfigV1;
+
+typedef struct ColmapKitFrameFeatureImportResultV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t status;
+  uint32_t mode;
+  uint32_t no_fallback_satisfied;
+  uint32_t effective_worker_count;
+  uint64_t imported_items;
+  uint64_t imported_cameras;
+  uint64_t imported_keypoints;
+  uint64_t imported_descriptor_bytes;
+  uint64_t admitted_memory_bytes;
+  uint64_t peak_resident_memory_bytes;
+  double validation_seconds;
+  double database_seconds;
+  double receipt_seconds;
+  double total_seconds;
+  char sealed_set_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char database_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char receipt_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char profile_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char source_identity[COLMAPKIT_FRAME_FEATURE_SOURCE_IDENTITY_CAPACITY];
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitFrameFeatureImportResultV1;
+
+typedef struct ColmapKitFrameFeatureImportJobV1
+    ColmapKitFrameFeatureImportJobV1;
+
 COLMAPKIT_EXPORT const char* ColmapKitVersion(void);
 
 COLMAPKIT_EXPORT uint32_t ColmapKitGetABIVersionV2(void);
@@ -658,6 +758,18 @@ COLMAPKIT_EXPORT ColmapKitStatus ColmapKitValidateFrameFeatureArtifactV1(
     const ColmapKitFrameFeatureExtractorV1* extractor,
     const ColmapKitFrameFeatureArtifactExpectationV1* expectation,
     ColmapKitFrameFeatureResultV1* result);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartFrameFeatureImportV1(
+    const ColmapKitFrameFeatureImportConfigV1* config,
+    ColmapKitFrameFeatureImportJobV1** job,
+    ColmapKitFrameFeatureErrorV1* error);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelFrameFeatureImportV1(
+    ColmapKitFrameFeatureImportJobV1* job, ColmapKitFrameFeatureErrorV1* error);
+COLMAPKIT_EXPORT ColmapKitStatus
+ColmapKitWaitFrameFeatureImportV1(ColmapKitFrameFeatureImportJobV1* job,
+                                  ColmapKitFrameFeatureImportResultV1* result);
+COLMAPKIT_EXPORT void ColmapKitReleaseFrameFeatureImportJobV1(
+    ColmapKitFrameFeatureImportJobV1* job);
 
 #ifdef __cplusplus
 }

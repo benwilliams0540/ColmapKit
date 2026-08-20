@@ -626,10 +626,6 @@ struct OwnedInput {
   uint64_t admitted_memory_bytes = 0;
 };
 
-struct ParsedArtifact {
-  ColmapKitFrameFeatureResultV1 result{};
-};
-
 void InitializeResult(ColmapKitFrameFeatureResultV1* result) {
   *result = {};
   result->struct_size = sizeof(*result);
@@ -827,12 +823,13 @@ void WriteArtifactAtomically(const std::filesystem::path& output_path,
   }
 }
 
-ParsedArtifact ParseArtifact(const ExtractorState& state,
-                             const std::filesystem::path& path,
-                             const uint64_t expected_stable_frame_id,
-                             const uint64_t expected_frame_revision,
-                             const std::string_view expected_image_sha256,
-                             const std::string_view expected_metadata_sha256) {
+colmap::internal::FrameFeatureArtifactDataV1 ParseArtifact(
+    const ExtractorState& state,
+    const std::filesystem::path& path,
+    const uint64_t expected_stable_frame_id,
+    const uint64_t expected_frame_revision,
+    const std::string_view expected_image_sha256,
+    const std::string_view expected_metadata_sha256) {
   const uint64_t maximum_artifact_bytes = CheckedAdd(
       state.config.memory_admission_budget_bytes, 16ULL * 1024ULL * 1024ULL);
   const std::vector<uint8_t> bytes =
@@ -855,8 +852,11 @@ ParsedArtifact ParseArtifact(const ExtractorState& state,
     throw std::invalid_argument("Frame feature artifact is not complete.");
   }
 
-  ParsedArtifact parsed;
+  colmap::internal::FrameFeatureArtifactDataV1 parsed;
   InitializeResult(&parsed.result);
+  parsed.metadata.struct_size = sizeof(parsed.metadata);
+  parsed.metadata.abi_version = COLMAPKIT_FRAME_FEATURE_ABI_VERSION_V1;
+  parsed.metadata.image_format = COLMAPKIT_FRAME_IMAGE_FORMAT_V1_JPEG;
   parsed.result.stable_frame_id = reader.Read<uint64_t>();
   parsed.result.frame_revision = reader.Read<uint64_t>();
   parsed.result.encoded_width = reader.Read<uint32_t>();
@@ -890,6 +890,14 @@ ParsedArtifact ParseArtifact(const ExtractorState& state,
           "Non-canonical camera metadata in feature artifact.");
     }
   }
+  parsed.metadata.encoded_width = parsed.result.encoded_width;
+  parsed.metadata.encoded_height = parsed.result.encoded_height;
+  parsed.metadata.orientation = orientation;
+  parsed.metadata.camera_model = camera_model;
+  parsed.metadata.num_camera_params = num_camera_params;
+  std::copy(camera_params.begin(),
+            camera_params.end(),
+            parsed.metadata.camera_params);
   if (reader.Read<uint32_t>() != COLMAPKIT_FRAME_FEATURE_BACKEND_V1_CPU ||
       reader.Read<uint32_t>() != kSiftExtractorType ||
       reader.Read<uint32_t>() != state.config.normalization ||
@@ -940,15 +948,27 @@ ParsedArtifact ParseArtifact(const ExtractorState& state,
       parsed.result.processed_height == 0) {
     throw std::invalid_argument("Invalid frame feature image dimensions.");
   }
+  parsed.keypoints.reserve(parsed.result.feature_count);
   for (uint64_t i = 0; i < parsed.result.feature_count; ++i) {
-    for (uint32_t column = 0; column < kKeypointColumns; ++column) {
-      if (!std::isfinite(reader.Read<float>())) {
-        throw std::invalid_argument(
-            "Non-finite keypoint in frame feature artifact.");
-      }
+    std::array<float, kKeypointColumns> values{};
+    for (float& value : values) value = reader.Read<float>();
+    if (!std::all_of(values.begin(), values.end(), [](const float value) {
+          return std::isfinite(value);
+        })) {
+      throw std::invalid_argument(
+          "Non-finite keypoint in frame feature artifact.");
     }
+    parsed.keypoints.emplace_back(
+        values[0], values[1], values[2], values[3], values[4], values[5]);
   }
-  reader.ReadBytes(static_cast<size_t>(parsed.result.descriptor_bytes));
+  const std::vector<uint8_t> descriptor_bytes =
+      reader.ReadBytes(static_cast<size_t>(parsed.result.descriptor_bytes));
+  parsed.descriptors.type = colmap::FeatureExtractorType::SIFT;
+  parsed.descriptors.data.resize(parsed.result.feature_count,
+                                 kDescriptorDimensions);
+  std::copy(descriptor_bytes.begin(),
+            descriptor_bytes.end(),
+            parsed.descriptors.data.data());
   if (reader.Offset() != payload_size) {
     throw std::invalid_argument(
         "Unexpected trailing frame feature payload data.");
@@ -1034,6 +1054,35 @@ struct ColmapKitFrameFeatureJobV1 {
   ColmapKitFrameFeatureResultV1 result{};
   std::thread worker;
 };
+
+namespace colmap::internal {
+
+FrameFeatureArtifactDataV1 LoadFrameFeatureArtifactV1(
+    const ColmapKitFrameFeatureExtractorV1* extractor,
+    const ColmapKitFrameFeatureArtifactExpectationV1& expectation) {
+  if (extractor == nullptr || extractor->state == nullptr ||
+      expectation.struct_size < sizeof(expectation) ||
+      expectation.abi_version != COLMAPKIT_FRAME_FEATURE_ABI_VERSION_V1 ||
+      expectation.expected_image_sha256 == nullptr ||
+      expectation.expected_metadata_sha256 == nullptr ||
+      expectation.artifact_path == nullptr) {
+    throw std::invalid_argument("Invalid frame feature loading expectation.");
+  }
+  const std::string image_sha256(expectation.expected_image_sha256);
+  const std::string metadata_sha256(expectation.expected_metadata_sha256);
+  if (!IsLowerHexSHA256(image_sha256) || !IsLowerHexSHA256(metadata_sha256)) {
+    throw std::invalid_argument(
+        "Expected artifact hashes must be lowercase hex.");
+  }
+  return ParseArtifact(*extractor->state,
+                       expectation.artifact_path,
+                       expectation.stable_frame_id,
+                       expectation.frame_revision,
+                       image_sha256,
+                       metadata_sha256);
+}
+
+}  // namespace colmap::internal
 
 namespace {
 
@@ -1408,12 +1457,12 @@ ColmapKitStatus ColmapKitValidateFrameFeatureArtifactV1(
       throw std::invalid_argument(
           "Expected artifact hashes must be lowercase hex.");
     }
-    const ParsedArtifact parsed = ParseArtifact(*extractor->state,
-                                                expectation->artifact_path,
-                                                expectation->stable_frame_id,
-                                                expectation->frame_revision,
-                                                image_sha256,
-                                                metadata_sha256);
+    const auto parsed = ParseArtifact(*extractor->state,
+                                      expectation->artifact_path,
+                                      expectation->stable_frame_id,
+                                      expectation->frame_revision,
+                                      image_sha256,
+                                      metadata_sha256);
     local = parsed.result;
   } catch (const std::exception& exception) {
     local.status = StatusForException(exception);
