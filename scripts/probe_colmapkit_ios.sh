@@ -9,6 +9,7 @@ XCFRAMEWORK_PATH="$PACKAGE_ROOT/ColmapKit.xcframework"
 GENERATOR="${CMAKE_GENERATOR:-Ninja}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
 SIFT_METAL_ENABLED="${SIFT_METAL_ENABLED:-OFF}"
+COLMAPKIT_RELEASE_VERSION="${COLMAPKIT_RELEASE_VERSION:-0.3.0-dev}"
 COLMAPKIT_CLEAN="${COLMAPKIT_CLEAN:-ON}"
 COLMAPKIT_IOS_STRICT_DEPS="${COLMAPKIT_IOS_STRICT_DEPS:-ON}"
 COLMAPKIT_IOS_BUILD="${COLMAPKIT_IOS_BUILD:-ON}"
@@ -71,6 +72,7 @@ Settings:
 - vcpkg overlay ports: ${COLMAPKIT_VCPKG_OVERLAY_PORTS:-unset}
 - vcpkg default manifest features disabled: $COLMAPKIT_IOS_VCPKG_MANIFEST_NO_DEFAULT_FEATURES
 - SiftMetal compiled and packaged: $SIFT_METAL_ENABLED
+- ColmapKit release identity: $COLMAPKIT_RELEASE_VERSION
 
 SUMMARY
 
@@ -127,6 +129,7 @@ run_slice() {
     -DCMAKE_BUILD_TYPE=Release
     -DCOLMAPKIT_FRAMEWORK_ENABLED=ON
     -DCOLMAPKIT_SOURCE_REVISION="${COLMAPKIT_SOURCE_REVISION:-}"
+    -DCOLMAPKIT_RELEASE_VERSION="$COLMAPKIT_RELEASE_VERSION"
     -DGUI_ENABLED=OFF
     -DCUDA_ENABLED=OFF
     -DOPENGL_ENABLED=OFF
@@ -324,7 +327,18 @@ audit_framework() {
     ColmapKitStartRGBGaussianPriorV2 \
     ColmapKitCancelRGBGaussianPriorV2 \
     ColmapKitWaitRGBGaussianPriorV2 \
-    ColmapKitReleaseRGBGaussianPriorJobV2; do
+    ColmapKitReleaseRGBGaussianPriorJobV2 \
+    ColmapKitCreateFrameFeatureExtractorV1 \
+    ColmapKitStartFrameFeatureExtractionV1 \
+    ColmapKitCancelFrameFeatureExtractionV1 \
+    ColmapKitWaitFrameFeatureExtractionV1 \
+    ColmapKitReleaseFrameFeatureJobV1 \
+    ColmapKitReleaseFrameFeatureExtractorV1 \
+    ColmapKitValidateFrameFeatureArtifactV1 \
+    ColmapKitStartFrameFeatureImportV1 \
+    ColmapKitCancelFrameFeatureImportV1 \
+    ColmapKitWaitFrameFeatureImportV1 \
+    ColmapKitReleaseFrameFeatureImportJobV1; do
     if ! grep -Eq "[[:space:]]_${symbol}$" <<< "$symbols_output"; then
       append_summary "- $label audit: failed (missing exported symbol $symbol)"
       return 1
@@ -409,7 +423,7 @@ package_xcframework() {
     local smoke_log="$smoke_root/build.log"
     local module_cache="$smoke_root/module-cache"
     mkdir -p "$module_cache"
-    cat > "$smoke_source" <<'SWIFT'
+    cat > "$smoke_source" <<SWIFT
 import ColmapKit
 
 _ = ColmapKitRunSparseReconstruction
@@ -426,8 +440,19 @@ _ = ColmapKitStartRGBGaussianPriorV2
 _ = ColmapKitCancelRGBGaussianPriorV2
 _ = ColmapKitWaitRGBGaussianPriorV2
 _ = ColmapKitReleaseRGBGaussianPriorJobV2
+_ = ColmapKitCreateFrameFeatureExtractorV1
+_ = ColmapKitStartFrameFeatureExtractionV1
+_ = ColmapKitCancelFrameFeatureExtractionV1
+_ = ColmapKitWaitFrameFeatureExtractionV1
+_ = ColmapKitReleaseFrameFeatureJobV1
+_ = ColmapKitReleaseFrameFeatureExtractorV1
+_ = ColmapKitValidateFrameFeatureArtifactV1
+_ = ColmapKitStartFrameFeatureImportV1
+_ = ColmapKitCancelFrameFeatureImportV1
+_ = ColmapKitWaitFrameFeatureImportV1
+_ = ColmapKitReleaseFrameFeatureImportJobV1
 precondition(ColmapKitGetABIVersionV2() == 2)
-precondition(!String(cString: ColmapKitGetReleaseVersionV2()).isEmpty)
+precondition(String(cString: ColmapKitGetReleaseVersionV2()) == "$COLMAPKIT_RELEASE_VERSION")
 precondition(!String(cString: ColmapKitGetEngineBuildIdentityV2()).isEmpty)
 let version = String(cString: ColmapKitVersion())
 precondition(!version.isEmpty)

@@ -83,7 +83,10 @@ constexpr uint32_t kPriorResultMinimumSize =
 constexpr double kRigidTolerance = 1e-5;
 constexpr double kAnchorTolerance = 1e-10;
 constexpr size_t kTrackedFeatureWorkerLimit = 2;
-constexpr char kReleaseVersion[] = "0.3.0-dev";
+#ifndef COLMAPKIT_RELEASE_VERSION
+#define COLMAPKIT_RELEASE_VERSION "0.3.0-dev"
+#endif
+constexpr char kReleaseVersion[] = COLMAPKIT_RELEASE_VERSION;
 
 class CancelledError : public std::runtime_error {
  public:

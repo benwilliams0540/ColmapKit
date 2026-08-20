@@ -13,6 +13,7 @@ AUDIT_ROOT="$DIST_ROOT/audits"
 MACOS_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET:-15.0}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
 SIFT_METAL_ENABLED="${SIFT_METAL_ENABLED:-OFF}"
+COLMAPKIT_RELEASE_VERSION="${COLMAPKIT_RELEASE_VERSION:-0.3.0-dev}"
 COLMAPKIT_BUILD_MACOS="${COLMAPKIT_BUILD_MACOS:-ON}"
 COLMAPKIT_BUILD_IOS="${COLMAPKIT_BUILD_IOS:-ON}"
 COLMAPKIT_BUILD_LIBOMP="${COLMAPKIT_BUILD_LIBOMP:-ON}"
@@ -48,6 +49,17 @@ REQUIRED_ENTRY_POINTS=(
   ColmapKitCancelRGBGaussianPriorV2
   ColmapKitWaitRGBGaussianPriorV2
   ColmapKitReleaseRGBGaussianPriorJobV2
+  ColmapKitCreateFrameFeatureExtractorV1
+  ColmapKitStartFrameFeatureExtractionV1
+  ColmapKitCancelFrameFeatureExtractionV1
+  ColmapKitWaitFrameFeatureExtractionV1
+  ColmapKitReleaseFrameFeatureJobV1
+  ColmapKitReleaseFrameFeatureExtractorV1
+  ColmapKitValidateFrameFeatureArtifactV1
+  ColmapKitStartFrameFeatureImportV1
+  ColmapKitCancelFrameFeatureImportV1
+  ColmapKitWaitFrameFeatureImportV1
+  ColmapKitReleaseFrameFeatureImportJobV1
 )
 
 if [[ -z "$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" && -n "$COLMAPKIT_VCPKG_ROOT" ]]; then
@@ -87,6 +99,7 @@ if [[ "$COLMAPKIT_BUILD_MACOS" == "ON" ]]; then
     COLMAPKIT_IGNORE_PREFIXES='/opt/homebrew;/usr/local;/opt/anaconda3' \
     LIBOMP_ROOT="$LIBOMP_ROOT" \
     SIFT_METAL_ENABLED="$SIFT_METAL_ENABLED" \
+    COLMAPKIT_RELEASE_VERSION="$COLMAPKIT_RELEASE_VERSION" \
     X_VCPKG_REGISTRIES_CACHE="$VCPKG_REGISTRIES_CACHE" \
     VCPKG_DEFAULT_BINARY_CACHE="$VCPKG_BINARY_CACHE" \
     bash "$ROOT_DIR/scripts/build_colmapkit_xcframework.sh"
@@ -102,6 +115,7 @@ if [[ "$COLMAPKIT_BUILD_IOS" == "ON" ]]; then
     COLMAPKIT_IOS_PACKAGE_ROOT="$IOS_PACKAGE_ROOT" \
     IOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
     SIFT_METAL_ENABLED="$SIFT_METAL_ENABLED" \
+    COLMAPKIT_RELEASE_VERSION="$COLMAPKIT_RELEASE_VERSION" \
     COLMAPKIT_VCPKG_ROOT="$COLMAPKIT_VCPKG_ROOT" \
     COLMAPKIT_CMAKE_TOOLCHAIN_FILE="$COLMAPKIT_CMAKE_TOOLCHAIN_FILE" \
     COLMAPKIT_CMAKE_MAKE_PROGRAM="$COLMAPKIT_CMAKE_MAKE_PROGRAM" \
@@ -121,6 +135,100 @@ for framework in "$MACOS_FRAMEWORK" "$IOS_FRAMEWORK" "$IOS_SIMULATOR_FRAMEWORK";
     exit 1
   fi
 done
+
+NOTICE_NAME="ColmapKit-THIRD-PARTY-NOTICES.txt"
+NOTICE_PATH="$AUDIT_ROOT/$NOTICE_NAME"
+NOTICE_INPUTS_RAW="$AUDIT_ROOT/license-inputs.raw.tsv"
+NOTICE_INPUTS_SORTED="$AUDIT_ROOT/license-inputs.sorted.tsv"
+NOTICE_INPUTS="$AUDIT_ROOT/license-inputs.txt"
+: > "$NOTICE_INPUTS_RAW"
+
+add_notice_input() {
+  local label="$1"
+  local path="$2"
+  if [[ ! -f "$path" ]]; then
+    echo "error: Missing required license input: $label ($path)" >&2
+    exit 1
+  fi
+  printf '%s\t%s\t%s\n' \
+    "$label" \
+    "$(shasum -a 256 "$path" | awk '{ print $1 }')" \
+    "$path" >> "$NOTICE_INPUTS_RAW"
+}
+
+add_notice_input "COLMAP/COPYING.txt" "$ROOT_DIR/COPYING.txt"
+while IFS= read -r license_path; do
+  add_notice_input \
+    "COLMAP/${license_path#"$ROOT_DIR/"}" \
+    "$license_path"
+done < <(find "$ROOT_DIR/src/thirdparty" -maxdepth 2 -type f \
+  \( -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) | sort)
+
+for dependency in faiss poselib; do
+  dependency_license="$(find "$BUILD_ROOT/macos" -type f \
+    -path "*/_deps/$dependency-src/LICENSE" -print -quit)"
+  add_notice_input "fetched/$dependency/LICENSE" "$dependency_license"
+done
+
+OPENMP_LICENSE="$(find "$BUILD_ROOT/libomp-build/src" -type f \
+  -path '*/openmp/LICENSE.TXT' -print -quit)"
+add_notice_input "runtime/openmp/LICENSE.TXT" "$OPENMP_LICENSE"
+
+for installed_root in \
+  "$COLMAPKIT_MACOS_VCPKG_INSTALLED_DIR" \
+  "$COLMAPKIT_IOS_VCPKG_INSTALLED_DIR"; do
+  while IFS= read -r copyright_path; do
+    package_name="$(basename "$(dirname "$copyright_path")")"
+    add_notice_input "vcpkg/$package_name/copyright" "$copyright_path"
+  done < <(find "$installed_root" -type f -path '*/share/*/copyright' | sort)
+done
+
+LC_ALL=C sort -t $'\t' -k1,1 -k2,2 "$NOTICE_INPUTS_RAW" > "$NOTICE_INPUTS_SORTED"
+: > "$NOTICE_INPUTS"
+cat > "$NOTICE_PATH" <<'NOTICE'
+ColmapKit third-party notices
+================================
+
+This file collects the license texts shipped with ColmapKit and its packaged
+binary dependencies. The section labels are deterministic provenance labels;
+they are not host filesystem paths.
+NOTICE
+
+previous_label=""
+previous_sha=""
+while IFS=$'\t' read -r label sha256 license_path; do
+  if [[ "$label" == "$previous_label" ]]; then
+    if [[ "$sha256" != "$previous_sha" ]]; then
+      echo "error: License text differs across slices for $label." >&2
+      exit 1
+    fi
+    continue
+  fi
+  printf '%s  %s\n' "$sha256" "$label" >> "$NOTICE_INPUTS"
+  {
+    printf '\n\n------------------------------------------------------------------------\n'
+    printf '%s\n' "$label"
+    printf '%s\n' '------------------------------------------------------------------------'
+    cat "$license_path"
+  } >> "$NOTICE_PATH"
+  previous_label="$label"
+  previous_sha="$sha256"
+done < "$NOTICE_INPUTS_SORTED"
+rm -f "$NOTICE_INPUTS_RAW" "$NOTICE_INPUTS_SORTED"
+
+install_notice() {
+  local framework="$1"
+  local resources="$framework/Resources"
+  if [[ -d "$framework/Versions/A" ]]; then
+    resources="$framework/Versions/A/Resources"
+  fi
+  mkdir -p "$resources"
+  cp "$NOTICE_PATH" "$resources/$NOTICE_NAME"
+}
+
+install_notice "$MACOS_FRAMEWORK"
+install_notice "$IOS_FRAMEWORK"
+install_notice "$IOS_SIMULATOR_FRAMEWORK"
 
 framework_header() {
   local framework="$1"
@@ -201,6 +309,17 @@ audit_framework() {
     echo "error: $label is missing the packaged SiftMetal library." >&2
     exit 1
   fi
+
+  local notices
+  notices="$(find "$framework" -type f -name "$NOTICE_NAME" -print -quit)"
+  if [[ -z "$notices" ]]; then
+    echo "error: $label is missing $NOTICE_NAME." >&2
+    exit 1
+  fi
+  if ! cmp -s "$NOTICE_PATH" "$notices"; then
+    echo "error: $label contains a noncanonical third-party notice." >&2
+    exit 1
+  fi
   if [[ "$SIFT_METAL_ENABLED" != "ON" && -n "$metallib" ]]; then
     echo "error: $label unexpectedly contains a SiftMetal library." >&2
     exit 1
@@ -227,6 +346,8 @@ audit_framework() {
       file "$metallib"
       shasum -a 256 "$metallib"
     fi
+    printf '\n## license notices\n'
+    shasum -a 256 "$notices"
   } > "$audit_path" 2>&1
 
   if ! grep -Fq "platform $expected_platform" "$audit_path" ||
@@ -265,7 +386,7 @@ codesign --verify --deep --strict --verbose=2 "$XCFRAMEWORK_PATH" > "$AUDIT_ROOT
 SWIFT_LINK_ROOT="$AUDIT_ROOT/swift-link"
 SWIFT_SOURCE="$SWIFT_LINK_ROOT/main.swift"
 mkdir -p "$SWIFT_LINK_ROOT"
-cat > "$SWIFT_SOURCE" <<'SWIFT'
+cat > "$SWIFT_SOURCE" <<SWIFT
 import ColmapKit
 
 _ = ColmapKitRunSparseReconstruction
@@ -286,8 +407,19 @@ _ = ColmapKitStartRGBGaussianPriorV2
 _ = ColmapKitCancelRGBGaussianPriorV2
 _ = ColmapKitWaitRGBGaussianPriorV2
 _ = ColmapKitReleaseRGBGaussianPriorJobV2
+_ = ColmapKitCreateFrameFeatureExtractorV1
+_ = ColmapKitStartFrameFeatureExtractionV1
+_ = ColmapKitCancelFrameFeatureExtractionV1
+_ = ColmapKitWaitFrameFeatureExtractionV1
+_ = ColmapKitReleaseFrameFeatureJobV1
+_ = ColmapKitReleaseFrameFeatureExtractorV1
+_ = ColmapKitValidateFrameFeatureArtifactV1
+_ = ColmapKitStartFrameFeatureImportV1
+_ = ColmapKitCancelFrameFeatureImportV1
+_ = ColmapKitWaitFrameFeatureImportV1
+_ = ColmapKitReleaseFrameFeatureImportJobV1
 precondition(ColmapKitGetABIVersionV2() == 2)
-precondition(!String(cString: ColmapKitGetReleaseVersionV2()).isEmpty)
+precondition(String(cString: ColmapKitGetReleaseVersionV2()) == "$COLMAPKIT_RELEASE_VERSION")
 precondition(!String(cString: ColmapKitGetEngineBuildIdentityV2()).isEmpty)
 precondition(!String(cString: ColmapKitVersion()).isEmpty)
 SWIFT
@@ -333,6 +465,74 @@ swift_link_slice \
   iphonesimulator \
   "arm64-apple-ios$IOS_DEPLOYMENT_TARGET-simulator" \
   "$XCFRAMEWORK_PATH/ios-arm64-simulator"
+DYLD_FRAMEWORK_PATH="$XCFRAMEWORK_PATH/macos-arm64" \
+  "$SWIFT_LINK_ROOT/macos-arm64" > "$SWIFT_LINK_ROOT/macos-arm64-runtime.log" 2>&1
+
+SWIFT_PACKAGE_ROOT="$AUDIT_ROOT/swift-package-consumer"
+rm -rf "$SWIFT_PACKAGE_ROOT"
+mkdir -p "$SWIFT_PACKAGE_ROOT/Sources/ColmapKitConsumer"
+ln -s ../../ColmapKit.xcframework "$SWIFT_PACKAGE_ROOT/ColmapKit.xcframework"
+cat > "$SWIFT_PACKAGE_ROOT/Package.swift" <<'SWIFT_PACKAGE'
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "ColmapKitConsumerAudit",
+    platforms: [.macOS(.v15), .iOS(.v18)],
+    products: [
+        .library(name: "ColmapKitConsumer", targets: ["ColmapKitConsumer"]),
+    ],
+    targets: [
+        .binaryTarget(name: "ColmapKit", path: "ColmapKit.xcframework"),
+        .target(name: "ColmapKitConsumer", dependencies: ["ColmapKit"]),
+    ]
+)
+SWIFT_PACKAGE
+cat > "$SWIFT_PACKAGE_ROOT/Sources/ColmapKitConsumer/ColmapKitConsumer.swift" <<'SWIFT_CONSUMER'
+import ColmapKit
+
+public enum ColmapKitConsumerAudit {
+  public static func verifyPublicSurface() {
+    _ = ColmapKitRunSparseReconstruction
+    _ = ColmapKitStartSparseReconstruction
+    _ = ColmapKitRunTrackedPoseReconstructionV2
+    _ = ColmapKitRunRGBGaussianPriorV2
+    _ = ColmapKitCreateFrameFeatureExtractorV1
+    _ = ColmapKitStartFrameFeatureExtractionV1
+    _ = ColmapKitCancelFrameFeatureExtractionV1
+    _ = ColmapKitWaitFrameFeatureExtractionV1
+    _ = ColmapKitReleaseFrameFeatureJobV1
+    _ = ColmapKitReleaseFrameFeatureExtractorV1
+    _ = ColmapKitValidateFrameFeatureArtifactV1
+    _ = ColmapKitStartFrameFeatureImportV1
+    _ = ColmapKitCancelFrameFeatureImportV1
+    _ = ColmapKitWaitFrameFeatureImportV1
+    _ = ColmapKitReleaseFrameFeatureImportJobV1
+    precondition(ColmapKitGetABIVersionV2() == 2)
+  }
+}
+SWIFT_CONSUMER
+
+swift_package_build() {
+  local label="$1"
+  local destination="$2"
+  local derived_data="$SWIFT_PACKAGE_ROOT/derived-data-$label"
+  xcodebuild \
+    -scheme ColmapKitConsumer \
+    -destination "$destination" \
+    -derivedDataPath "$derived_data" \
+    ARCHS=arm64 \
+    ONLY_ACTIVE_ARCH=YES \
+    CODE_SIGNING_ALLOWED=NO \
+    build > "$SWIFT_PACKAGE_ROOT/$label.log" 2>&1
+}
+
+(
+  cd "$SWIFT_PACKAGE_ROOT"
+  swift_package_build macos-arm64 'generic/platform=macOS'
+  swift_package_build ios-arm64 'generic/platform=iOS'
+  swift_package_build ios-arm64-simulator 'generic/platform=iOS Simulator'
+)
 
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$XCFRAMEWORK_PATH" "$ZIP_PATH"
@@ -345,10 +545,28 @@ FRAMEWORK_SIZE_BYTES="$(du -sk "$XCFRAMEWORK_PATH" | awk '{ print $1 * 1024 }')"
 ZIP_SIZE_BYTES="$(stat -f '%z' "$ZIP_PATH")"
 ZIP_SHA256="$(awk '{ print $1 }' "$DIST_ROOT/ColmapKit.xcframework.zip.sha256")"
 SWIFTPM_CHECKSUM="$(tr -d '\n' < "$DIST_ROOT/ColmapKit.xcframework.zip.swiftpm-checksum")"
+HEADER_SHA256="$(shasum -a 256 "$MACOS_HEADER" | awk '{ print $1 }')"
+MODULEMAP_SHA256="$(shasum -a 256 "$MACOS_MODULEMAP" | awk '{ print $1 }')"
+NOTICE_SHA256="$(shasum -a 256 "$NOTICE_PATH" | awk '{ print $1 }')"
+XCODE_VERSION="$(xcodebuild -version | tr '\n' ' ')"
+MACOS_SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+IPHONEOS_SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+IPHONESIMULATOR_SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+
+{
+  find "$XCFRAMEWORK_PATH" -type f -print0 | LC_ALL=C sort -z |
+    while IFS= read -r -d '' artifact; do
+      printf '%s  %s\n' \
+        "$(shasum -a 256 "$artifact" | awk '{ print $1 }')" \
+        "${artifact#"$DIST_ROOT/"}"
+    done
+  printf '%s  %s\n' "$ZIP_SHA256" "${ZIP_PATH#"$DIST_ROOT/"}"
+} > "$AUDIT_ROOT/package-hashes.txt"
 
 cat > "$DIST_ROOT/artifact-summary.txt" <<SUMMARY
 source_commit=$SOURCE_COMMIT
 source_revision=${COLMAPKIT_SOURCE_REVISION:-$SOURCE_COMMIT}
+release_version=$COLMAPKIT_RELEASE_VERSION
 source_patch_sha256=$SOURCE_PATCH_SHA256
 xcframework=$XCFRAMEWORK_PATH
 framework_size_bytes=$FRAMEWORK_SIZE_BYTES
@@ -356,10 +574,21 @@ zip=$ZIP_PATH
 zip_size_bytes=$ZIP_SIZE_BYTES
 zip_sha256=$ZIP_SHA256
 swiftpm_checksum=$SWIFTPM_CHECKSUM
+public_header_sha256=$HEADER_SHA256
+modulemap_sha256=$MODULEMAP_SHA256
+third_party_notices_sha256=$NOTICE_SHA256
 slices=macos-arm64,ios-arm64,ios-arm64-simulator
 macos_deployment_target=$MACOS_DEPLOYMENT_TARGET
 ios_deployment_target=$IOS_DEPLOYMENT_TARGET
 sift_metal_enabled=$SIFT_METAL_ENABLED
+xcode=$XCODE_VERSION
+macos_sdk=$MACOS_SDK_VERSION
+iphoneos_sdk=$IPHONEOS_SDK_VERSION
+iphonesimulator_sdk=$IPHONESIMULATOR_SDK_VERSION
+cmake=$(cmake --version | head -1)
+ninja=$($COLMAPKIT_CMAKE_MAKE_PROGRAM --version)
+vcpkg_root=$COLMAPKIT_VCPKG_ROOT
+vcpkg_commit=$(git -C "$COLMAPKIT_VCPKG_ROOT" rev-parse HEAD)
 SUMMARY
 
 echo "Created $XCFRAMEWORK_PATH"

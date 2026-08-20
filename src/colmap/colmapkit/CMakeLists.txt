@@ -8,6 +8,8 @@ find_package(JPEG REQUIRED)
 set(COLMAPKIT_PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/colmapkit.h")
 set(COLMAPKIT_SOURCE_REVISION "" CACHE STRING
     "Exact source identity embedded in ColmapKit runtime evidence")
+set(COLMAPKIT_RELEASE_VERSION "0.3.0-dev" CACHE STRING
+    "ColmapKit package release identity embedded in the public ABI")
 set(COLMAPKIT_PUBLIC_LINK_LIBS
     colmap_controllers
     colmap_exe
@@ -36,6 +38,7 @@ COLMAP_ADD_LIBRARY(
 target_compile_definitions(colmap_colmapkit PRIVATE
     COLMAPKIT_BUILDING_LIBRARY
     COLMAPKIT_SOURCE_REVISION="${COLMAPKIT_SOURCE_REVISION}"
+    COLMAPKIT_RELEASE_VERSION="${COLMAPKIT_RELEASE_VERSION}"
 )
 
 if(COLMAPKIT_FRAMEWORK_ENABLED)
@@ -62,6 +65,7 @@ if(COLMAPKIT_FRAMEWORK_ENABLED)
     target_compile_definitions(ColmapKit PRIVATE
         COLMAPKIT_BUILDING_LIBRARY
         COLMAPKIT_SOURCE_REVISION="${COLMAPKIT_SOURCE_REVISION}"
+        COLMAPKIT_RELEASE_VERSION="${COLMAPKIT_RELEASE_VERSION}"
         ${COLMAP_COMPILE_DEFINITIONS}
     )
     target_include_directories(ColmapKit PUBLIC
