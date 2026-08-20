@@ -742,16 +742,86 @@ std::vector<uint32_t> StableImageOrder(const ColmapKitTrackedImageV2* images,
   return indices;
 }
 
-std::vector<std::pair<uint32_t, uint32_t>> BuildPairs(
+using InputPair = std::pair<uint32_t, uint32_t>;
+
+struct PairGraphSummary {
+  std::vector<uint32_t> degrees;
+  uint32_t components = 0;
+  uint32_t isolated_images = 0;
+  uint32_t largest_component_images = 0;
+};
+
+PairGraphSummary SummarizePairGraph(const uint32_t num_images,
+                                    const std::vector<InputPair>& pairs) {
+  PairGraphSummary summary;
+  summary.degrees.resize(num_images);
+  std::vector<std::vector<uint32_t>> adjacency(num_images);
+  for (const auto& [a, b] : pairs) {
+    ++summary.degrees.at(a);
+    ++summary.degrees.at(b);
+    adjacency.at(a).push_back(b);
+    adjacency.at(b).push_back(a);
+  }
+  std::vector<bool> visited(num_images);
+  for (uint32_t root = 0; root < num_images; ++root) {
+    if (visited[root]) continue;
+    ++summary.components;
+    uint32_t component_size = 0;
+    std::vector<uint32_t> stack{root};
+    visited[root] = true;
+    while (!stack.empty()) {
+      const uint32_t image = stack.back();
+      stack.pop_back();
+      ++component_size;
+      for (const uint32_t neighbor : adjacency[image]) {
+        if (!visited[neighbor]) {
+          visited[neighbor] = true;
+          stack.push_back(neighbor);
+        }
+      }
+    }
+    summary.largest_component_images =
+        std::max(summary.largest_component_images, component_size);
+  }
+  summary.isolated_images = static_cast<uint32_t>(std::count(
+      summary.degrees.begin(), summary.degrees.end(), uint32_t{0}));
+  return summary;
+}
+
+struct PairSelection {
+  std::vector<InputPair> pairs;
+  uint64_t temporal_attempts = 0;
+  uint64_t revisit_attempts = 0;
+  uint64_t revisit_rejected_below_min_translation = 0;
+  uint64_t revisit_rejected_above_max_translation = 0;
+  uint64_t revisit_rejected_above_max_rotation = 0;
+  uint64_t revisit_rejected_neighbor_limit = 0;
+  uint64_t revisit_selected_directed = 0;
+  uint64_t duplicate_candidates = 0;
+  uint64_t generated_unique_pairs = 0;
+  uint64_t rejected_by_pair_cap = 0;
+  std::optional<InputPair> first_pair_rejected_by_cap;
+  std::optional<InputPair> last_generated_pair;
+  PairGraphSummary generated_graph;
+  PairGraphSummary selected_graph;
+};
+
+PairSelection BuildPairs(
     const ColmapKitTrackedPoseConfigV2& config,
     const std::vector<uint32_t>& order,
     const std::vector<colmap::Rigid3d>& poses) {
-  std::set<std::pair<uint32_t, uint32_t>> pairs;
+  PairSelection selection;
+  std::set<InputPair> pairs;
   const uint32_t temporal = std::max(1u, config.temporal_neighbor_count);
   for (uint32_t p = 0; p < order.size(); ++p) {
     for (uint32_t delta = 1; delta <= temporal && p + delta < order.size(); ++delta) {
-      pairs.emplace(std::min(order[p], order[p + delta]),
-                    std::max(order[p], order[p + delta]));
+      ++selection.temporal_attempts;
+      if (!pairs
+               .emplace(std::min(order[p], order[p + delta]),
+                        std::max(order[p], order[p + delta]))
+               .second) {
+        ++selection.duplicate_candidates;
+      }
     }
   }
   for (uint32_t p = 0; p < order.size(); ++p) {
@@ -759,26 +829,46 @@ std::vector<std::pair<uint32_t, uint32_t>> BuildPairs(
     const Eigen::Vector3d center = CameraCenter(poses[order[p]]);
     for (uint32_t q = 0; q < order.size(); ++q) {
       if (p == q || (p > q ? p - q : q - p) <= temporal) continue;
+      ++selection.revisit_attempts;
       const double distance = (center - CameraCenter(poses[order[q]])).norm();
       const double angle = RotationDifferenceDegrees(poses[order[p]], poses[order[q]]);
-      if (distance >= config.revisit_min_translation_meters &&
-          distance <= config.revisit_max_translation_meters &&
-          angle <= config.revisit_max_rotation_degrees) {
-        candidates.emplace_back(distance, config.images[order[q]].order_index,
-                                order[q]);
+      if (distance < config.revisit_min_translation_meters) {
+        ++selection.revisit_rejected_below_min_translation;
+      } else if (distance > config.revisit_max_translation_meters) {
+        ++selection.revisit_rejected_above_max_translation;
+      } else if (angle > config.revisit_max_rotation_degrees) {
+        ++selection.revisit_rejected_above_max_rotation;
+      } else {
+        candidates.emplace_back(
+            distance, config.images[order[q]].order_index, order[q]);
       }
     }
     std::sort(candidates.begin(), candidates.end());
     const size_t limit = std::min<size_t>(
         config.max_revisit_neighbors_per_image, candidates.size());
+    selection.revisit_rejected_neighbor_limit += candidates.size() - limit;
     for (size_t i = 0; i < limit; ++i) {
       const uint32_t q = std::get<2>(candidates[i]);
-      pairs.emplace(std::min(order[p], q), std::max(order[p], q));
+      ++selection.revisit_selected_directed;
+      if (!pairs.emplace(std::min(order[p], q), std::max(order[p], q)).second) {
+        ++selection.duplicate_candidates;
+      }
     }
   }
-  std::vector<std::pair<uint32_t, uint32_t>> bounded(pairs.begin(), pairs.end());
-  if (bounded.size() > config.max_image_pairs) bounded.resize(config.max_image_pairs);
-  return bounded;
+  const std::vector<InputPair> generated(pairs.begin(), pairs.end());
+  selection.generated_unique_pairs = generated.size();
+  selection.generated_graph = SummarizePairGraph(config.num_images, generated);
+  if (!generated.empty()) selection.last_generated_pair = generated.back();
+  selection.pairs = generated;
+  if (selection.pairs.size() > config.max_image_pairs) {
+    selection.first_pair_rejected_by_cap = selection.pairs[config.max_image_pairs];
+    selection.rejected_by_pair_cap =
+        selection.pairs.size() - config.max_image_pairs;
+    selection.pairs.resize(config.max_image_pairs);
+  }
+  selection.selected_graph =
+      SummarizePairGraph(config.num_images, selection.pairs);
+  return selection;
 }
 
 std::string RelativeImageName(const ColmapKitTrackedImageV2& image) {
@@ -998,6 +1088,220 @@ uint32_t CountMatchedPairs(const colmap::Database& database) {
   return count;
 }
 
+struct PairMatchingTelemetry {
+  std::vector<uint64_t> keypoints_per_image;
+  std::vector<uint64_t> raw_matches_per_pair;
+  std::vector<uint64_t> verified_inliers_per_pair;
+  uint64_t pairs_with_raw_matches = 0;
+  uint64_t pairs_rejected_without_raw_matches = 0;
+  uint64_t pairs_accepted_by_geometric_verification = 0;
+  uint64_t pairs_rejected_by_geometric_verification = 0;
+  PairGraphSummary verified_graph;
+};
+
+PairMatchingTelemetry CollectPairMatchingTelemetry(
+    const colmap::Database& database,
+    const std::vector<InputPair>& pairs,
+    const std::vector<colmap::image_t>& image_ids,
+    const uint32_t num_images) {
+  PairMatchingTelemetry telemetry;
+  telemetry.keypoints_per_image.resize(num_images);
+  for (uint32_t i = 0; i < num_images; ++i) {
+    telemetry.keypoints_per_image[i] =
+        database.NumKeypointsForImage(image_ids.at(i));
+  }
+  telemetry.raw_matches_per_pair.resize(pairs.size());
+  telemetry.verified_inliers_per_pair.resize(pairs.size());
+  std::vector<InputPair> verified_pairs;
+  for (size_t p = 0; p < pairs.size(); ++p) {
+    const auto [a, b] = pairs[p];
+    const auto image_id_a = image_ids.at(a);
+    const auto image_id_b = image_ids.at(b);
+    if (database.ExistsMatches(image_id_a, image_id_b)) {
+      telemetry.raw_matches_per_pair[p] =
+          database.ReadMatches(image_id_a, image_id_b).size();
+    }
+    if (telemetry.raw_matches_per_pair[p] > 0) {
+      ++telemetry.pairs_with_raw_matches;
+    } else {
+      ++telemetry.pairs_rejected_without_raw_matches;
+    }
+    if (database.ExistsTwoViewGeometry(image_id_a, image_id_b)) {
+      telemetry.verified_inliers_per_pair[p] =
+          database.ReadTwoViewGeometry(image_id_a, image_id_b)
+              .inlier_matches.size();
+    }
+    if (telemetry.verified_inliers_per_pair[p] > 0) {
+      ++telemetry.pairs_accepted_by_geometric_verification;
+      verified_pairs.push_back(pairs[p]);
+    } else {
+      ++telemetry.pairs_rejected_by_geometric_verification;
+    }
+  }
+  telemetry.verified_graph = SummarizePairGraph(num_images, verified_pairs);
+  return telemetry;
+}
+
+struct ReconstructionPairTelemetry {
+  std::vector<uint64_t> observations_per_image;
+  std::vector<uint64_t> shared_points_per_pair;
+  std::map<uint64_t, uint64_t> track_length_histogram;
+};
+
+ReconstructionPairTelemetry CollectReconstructionPairTelemetry(
+    const colmap::Reconstruction& reconstruction,
+    const std::vector<InputPair>& pairs,
+    const std::vector<colmap::image_t>& image_ids,
+    const uint32_t num_images) {
+  ReconstructionPairTelemetry telemetry;
+  telemetry.observations_per_image.resize(num_images);
+  telemetry.shared_points_per_pair.resize(pairs.size());
+  std::unordered_map<colmap::image_t, uint32_t> input_by_image_id;
+  for (uint32_t i = 0; i < num_images; ++i) {
+    input_by_image_id.emplace(image_ids.at(i), i);
+  }
+  std::map<InputPair, size_t> pair_index;
+  for (size_t p = 0; p < pairs.size(); ++p) pair_index.emplace(pairs[p], p);
+  for (const auto point3D_id : reconstruction.Point3DIds()) {
+    const auto& track = reconstruction.Point3D(point3D_id).track;
+    ++telemetry.track_length_histogram[track.Length()];
+    std::vector<uint32_t> inputs;
+    inputs.reserve(track.Length());
+    for (const auto& element : track.Elements()) {
+      const auto input = input_by_image_id.find(element.image_id);
+      if (input == input_by_image_id.end()) continue;
+      ++telemetry.observations_per_image[input->second];
+      inputs.push_back(input->second);
+    }
+    std::sort(inputs.begin(), inputs.end());
+    inputs.erase(std::unique(inputs.begin(), inputs.end()), inputs.end());
+    for (size_t a = 0; a < inputs.size(); ++a) {
+      for (size_t b = a + 1; b < inputs.size(); ++b) {
+        const auto pair = pair_index.find({inputs[a], inputs[b]});
+        if (pair != pair_index.end()) {
+          ++telemetry.shared_points_per_pair[pair->second];
+        }
+      }
+    }
+  }
+  return telemetry;
+}
+
+void AppendGraphSummaryJSON(std::ostringstream& out,
+                            const PairGraphSummary& summary) {
+  const auto [minimum, maximum] = std::minmax_element(
+      summary.degrees.begin(), summary.degrees.end());
+  const uint64_t degree_sum =
+      std::accumulate(summary.degrees.begin(), summary.degrees.end(), uint64_t{0});
+  out << "{\"components\":" << summary.components
+      << ",\"isolated_images\":" << summary.isolated_images
+      << ",\"largest_component_images\":"
+      << summary.largest_component_images << ",\"minimum_degree\":"
+      << (minimum == summary.degrees.end() ? 0 : *minimum)
+      << ",\"maximum_degree\":"
+      << (maximum == summary.degrees.end() ? 0 : *maximum)
+      << ",\"mean_degree\":"
+      << (summary.degrees.empty()
+              ? 0.0
+              : static_cast<double>(degree_sum) / summary.degrees.size())
+      << '}';
+}
+
+std::string PairGraphTelemetryJSON(
+    const ColmapKitTrackedPoseConfigV2& config,
+    const PairSelection& selection,
+    const PairMatchingTelemetry& matching,
+    const ReconstructionPairTelemetry& reconstruction) {
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::setprecision(17);
+  auto append_pair = [&](const std::optional<InputPair>& pair) {
+    if (!pair.has_value()) {
+      out << "null";
+      return;
+    }
+    out << "{\"a_order_index\":" << config.images[pair->first].order_index
+        << ",\"b_order_index\":" << config.images[pair->second].order_index
+        << ",\"a_image\":\""
+        << JsonEscape(RelativeImageName(config.images[pair->first]))
+        << "\",\"b_image\":\""
+        << JsonEscape(RelativeImageName(config.images[pair->second])) << "\"}";
+  };
+  out << "{\n    \"enabled_by_flag\": true,\n"
+      << "    \"selection_order\": \"lexicographic_input_index\",\n"
+      << "    \"attempted\": {\"temporal\":"
+      << selection.temporal_attempts << ",\"revisit\":"
+      << selection.revisit_attempts << "},\n"
+      << "    \"generated_unique_pairs\": "
+      << selection.generated_unique_pairs << ",\n"
+      << "    \"selected_pairs\": " << selection.pairs.size() << ",\n"
+      << "    \"rejected\": {\"revisit_below_min_translation\":"
+      << selection.revisit_rejected_below_min_translation
+      << ",\"revisit_above_max_translation\":"
+      << selection.revisit_rejected_above_max_translation
+      << ",\"revisit_above_max_rotation\":"
+      << selection.revisit_rejected_above_max_rotation
+      << ",\"revisit_neighbor_limit\":"
+      << selection.revisit_rejected_neighbor_limit
+      << ",\"duplicate_candidates\":" << selection.duplicate_candidates
+      << ",\"pair_cap\":" << selection.rejected_by_pair_cap
+      << ",\"without_raw_matches\":"
+      << matching.pairs_rejected_without_raw_matches
+      << ",\"geometric_verification\":"
+      << matching.pairs_rejected_by_geometric_verification << "},\n"
+      << "    \"revisit_selected_directed\": "
+      << selection.revisit_selected_directed << ",\n"
+      << "    \"pairs_with_raw_matches\": "
+      << matching.pairs_with_raw_matches << ",\n"
+      << "    \"pairs_accepted_by_geometric_verification\": "
+      << matching.pairs_accepted_by_geometric_verification << ",\n"
+      << "    \"first_pair_rejected_by_cap\": ";
+  append_pair(selection.first_pair_rejected_by_cap);
+  out << ",\n    \"last_generated_pair\": ";
+  append_pair(selection.last_generated_pair);
+  out << ",\n    \"generated_graph\": ";
+  AppendGraphSummaryJSON(out, selection.generated_graph);
+  out << ",\n    \"selected_graph\": ";
+  AppendGraphSummaryJSON(out, selection.selected_graph);
+  out << ",\n    \"verified_graph\": ";
+  AppendGraphSummaryJSON(out, matching.verified_graph);
+  out << ",\n    \"track_length_histogram\": {";
+  bool first = true;
+  for (const auto& [length, count] : reconstruction.track_length_histogram) {
+    if (!first) out << ',';
+    first = false;
+    out << '\"' << length << "\":" << count;
+  }
+  out << "},\n    \"images\": [\n";
+  for (uint32_t i = 0; i < config.num_images; ++i) {
+    out << "      {\"order_index\":" << config.images[i].order_index
+        << ",\"image\":\"" << JsonEscape(RelativeImageName(config.images[i]))
+        << "\",\"extracted_keypoints\":" << matching.keypoints_per_image[i]
+        << ",\"selected_degree\":" << selection.selected_graph.degrees[i]
+        << ",\"verified_degree\":" << matching.verified_graph.degrees[i]
+        << ",\"final_observations\":"
+        << reconstruction.observations_per_image[i] << '}'
+        << (i + 1 == config.num_images ? "\n" : ",\n");
+  }
+  out << "    ],\n    \"pairs\": [\n";
+  for (size_t p = 0; p < selection.pairs.size(); ++p) {
+    const auto [a, b] = selection.pairs[p];
+    out << "      {\"a_order_index\":" << config.images[a].order_index
+        << ",\"b_order_index\":" << config.images[b].order_index
+        << ",\"a_image\":\"" << JsonEscape(RelativeImageName(config.images[a]))
+        << "\",\"b_image\":\"" << JsonEscape(RelativeImageName(config.images[b]))
+        << "\",\"raw_matches\":" << matching.raw_matches_per_pair[p]
+        << ",\"verified_inliers\":" << matching.verified_inliers_per_pair[p]
+        << ",\"final_shared_points\":"
+        << reconstruction.shared_points_per_pair[p]
+        << ",\"final_pair_observations\":"
+        << 2 * reconstruction.shared_points_per_pair[p] << '}'
+        << (p + 1 == selection.pairs.size() ? "\n" : ",\n");
+  }
+  out << "    ]\n  }";
+  return out.str();
+}
+
 ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
                            Cancellation* cancellation,
                            ColmapKitTrackedPoseResultV2* result) {
@@ -1181,7 +1485,12 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     }
     local.feature_seconds = Seconds(Clock::now() - feature_start).count();
 
-    const auto pairs = BuildPairs(config, order, initial_poses);
+    const bool pair_graph_telemetry_enabled =
+        (config.flags &
+         COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY) != 0;
+    const PairSelection pair_selection =
+        BuildPairs(config, order, initial_poses);
+    const auto& pairs = pair_selection.pairs;
     if (pairs.empty()) throw std::runtime_error("Bounded pair selection produced no pairs.");
     const std::filesystem::path pair_path = database_path.string() + ".v2-pairs.txt";
     std::ostringstream pair_text;
@@ -1216,6 +1525,11 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     local.matched_pairs = CountMatchedPairs(*database);
     if (local.matched_pairs == 0) {
       throw std::runtime_error("No bounded image pair passed geometric verification.");
+    }
+    PairMatchingTelemetry pair_matching_telemetry;
+    if (pair_graph_telemetry_enabled) {
+      pair_matching_telemetry = CollectPairMatchingTelemetry(
+          *database, pairs, image_ids, config.num_images);
     }
 
     colmap::DatabaseCache::Options cache_options;
@@ -1399,6 +1713,11 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     local.registered_images = static_cast<uint32_t>(reconstruction.NumRegImages());
     local.sparse_points = reconstruction.NumPoints3D();
     local.observations = reconstruction.ComputeNumObservations();
+    ReconstructionPairTelemetry reconstruction_pair_telemetry;
+    if (pair_graph_telemetry_enabled) {
+      reconstruction_pair_telemetry = CollectReconstructionPairTelemetry(
+          reconstruction, pairs, image_ids, config.num_images);
+    }
     std::ostringstream evidence;
     evidence.imbue(std::locale::classic());
     evidence << std::setprecision(17)
@@ -1433,7 +1752,14 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << "  \"max_rotation_correction_degrees\": "
              << local.max_rotation_correction_degrees << ",\n"
              << "  \"measured_scale_drift_ratio\": "
-             << local.measured_scale_drift_ratio << "\n}\n";
+             << local.measured_scale_drift_ratio;
+    if (pair_graph_telemetry_enabled) {
+      evidence << ",\n  \"pair_graph_telemetry\": "
+               << PairGraphTelemetryJSON(config, pair_selection,
+                                         pair_matching_telemetry,
+                                         reconstruction_pair_telemetry);
+    }
+    evidence << "\n}\n";
     WriteDeterministicText(evidence_path, evidence.str());
     local.export_seconds = Seconds(Clock::now() - export_start).count();
     local.status = COLMAPKIT_STATUS_OK;

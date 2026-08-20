@@ -8,8 +8,10 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -109,6 +111,7 @@ int main(int argc, char** argv) {
       (output_dir / "tracked-evidence.json").string();
   ColmapKitTrackedPoseConfigV2 tracked{};
   tracked.struct_size = sizeof(tracked);
+  tracked.flags = COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY;
   tracked.images = images.data();
   tracked.num_images = images.size();
   tracked.max_features_per_image = 4096;
@@ -141,6 +144,15 @@ int main(int argc, char** argv) {
   }
   if (!tracked_progress.monotonic || !tracked_progress.finished) {
     std::cerr << "Tracked V2 progress was not monotonic and terminal.\n";
+    return 1;
+  }
+  std::ifstream tracked_evidence_stream(tracked_evidence);
+  const std::string tracked_evidence_text{
+      std::istreambuf_iterator<char>(tracked_evidence_stream),
+      std::istreambuf_iterator<char>()};
+  if (tracked_evidence_text.find("\"pair_graph_telemetry\"") ==
+      std::string::npos) {
+    std::cerr << "Tracked V2 did not write requested pair telemetry.\n";
     return 1;
   }
 

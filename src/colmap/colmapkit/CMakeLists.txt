@@ -110,6 +110,14 @@ COLMAP_ADD_EXECUTABLE(
         colmap_colmapkit
 )
 
+COLMAP_ADD_EXECUTABLE(
+    NAME colmapkit_tracked_capture_runner
+    SRCS
+        tracked_capture_runner.cc
+    LINK_LIBS
+        colmap_colmapkit
+)
+
 COLMAP_ADD_TEST(
     NAME model_postprocessing_test
     SRCS

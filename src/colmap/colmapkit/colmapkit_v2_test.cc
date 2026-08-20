@@ -117,6 +117,12 @@ TEST(ColmapKitV2, ReportsSeparateABIReleaseAndEngineIdentity) {
   EXPECT_NE(std::string(ColmapKitVersion()).find("COLMAP"), std::string::npos);
 }
 
+TEST(ColmapKitV2, PairTelemetryFlagDoesNotChangeStructSizes) {
+  EXPECT_EQ(sizeof(ColmapKitTrackedPoseConfigV2), 160u);
+  EXPECT_EQ(sizeof(ColmapKitTrackedPoseResultV2), 1208u);
+  EXPECT_EQ(COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY, 1u);
+}
+
 TEST(ColmapKitV2, RejectsZeroAndTruncatedInputSizes) {
   ColmapKitTrackedPoseConfigV2 config{};
   ColmapKitTrackedPoseResultV2 result{};
