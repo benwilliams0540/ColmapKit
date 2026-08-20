@@ -36,16 +36,19 @@ struct OwnedImage {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 4 && argc != 5) {
+  if (argc < 4 || argc > 6) {
     std::cerr << "Usage: colmapkit_tracked_capture_runner "
                  "CAPTURE_MANIFEST OUTPUT_DIR MAX_IMAGE_PAIRS "
-                 "[PAIR_GRAPH_TELEMETRY=1]\n";
+                 "[PAIR_GRAPH_TELEMETRY=1] "
+                 "[CONNECTIVITY_PAIR_SELECTION=0]\n";
     return 2;
   }
   const std::filesystem::path manifest_path(argv[1]);
   const std::filesystem::path output_dir(argv[2]);
   const uint32_t max_image_pairs = static_cast<uint32_t>(std::stoul(argv[3]));
   const bool pair_graph_telemetry = argc == 4 || std::stoul(argv[4]) != 0;
+  const bool connectivity_pair_selection =
+      argc == 6 && std::stoul(argv[5]) != 0;
   std::filesystem::create_directories(output_dir);
 
   boost::property_tree::ptree manifest;
@@ -97,9 +100,13 @@ int main(int argc, char** argv) {
   const std::string evidence = (output_dir / "tracked-evidence.json").string();
   ColmapKitTrackedPoseConfigV2 config{};
   config.struct_size = sizeof(config);
-  config.flags = pair_graph_telemetry
-                     ? COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY
-                     : 0;
+  config.flags = 0;
+  if (pair_graph_telemetry) {
+    config.flags |= COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY;
+  }
+  if (connectivity_pair_selection) {
+    config.flags |= COLMAPKIT_TRACKED_POSE_FLAG_V2_CONNECTIVITY_PAIR_SELECTION;
+  }
   config.images = images.data();
   config.num_images = static_cast<uint32_t>(images.size());
   config.max_features_per_image = 4096;
@@ -139,6 +146,8 @@ int main(int argc, char** argv) {
               << ",\n  \"max_image_pairs\": " << max_image_pairs
               << ",\n  \"pair_graph_telemetry\": "
               << (pair_graph_telemetry ? "true" : "false")
+              << ",\n  \"connectivity_pair_selection\": "
+              << (connectivity_pair_selection ? "true" : "false")
               << ",\n  \"registered_images\": " << result.registered_images
               << ",\n  \"matched_pairs\": " << result.matched_pairs
               << ",\n  \"sparse_points\": " << result.sparse_points

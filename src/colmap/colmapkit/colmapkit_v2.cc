@@ -789,7 +789,19 @@ PairGraphSummary SummarizePairGraph(const uint32_t num_images,
 }
 
 struct PairSelection {
+  struct CandidateMetadata {
+    bool temporal = false;
+    uint32_t order_separation = 0;
+    double pose_distance_meters = 0;
+    double pose_rotation_degrees = 0;
+  };
+
   std::vector<InputPair> pairs;
+  std::map<InputPair, CandidateMetadata> candidate_metadata;
+  bool connectivity_policy_enabled = false;
+  uint32_t connectivity_backbone_pairs = 0;
+  uint32_t selected_temporal_pairs = 0;
+  uint32_t selected_revisit_pairs = 0;
   uint64_t temporal_attempts = 0;
   uint64_t revisit_attempts = 0;
   uint64_t revisit_rejected_below_min_translation = 0;
@@ -806,21 +818,32 @@ struct PairSelection {
   PairGraphSummary selected_graph;
 };
 
-PairSelection BuildPairs(
-    const ColmapKitTrackedPoseConfigV2& config,
-    const std::vector<uint32_t>& order,
-    const std::vector<colmap::Rigid3d>& poses) {
+PairSelection BuildPairs(const ColmapKitTrackedPoseConfigV2& config,
+                         const std::vector<uint32_t>& order,
+                         const std::vector<colmap::Rigid3d>& poses) {
   PairSelection selection;
   std::set<InputPair> pairs;
   const uint32_t temporal = std::max(1u, config.temporal_neighbor_count);
   for (uint32_t p = 0; p < order.size(); ++p) {
-    for (uint32_t delta = 1; delta <= temporal && p + delta < order.size(); ++delta) {
+    for (uint32_t delta = 1; delta <= temporal && p + delta < order.size();
+         ++delta) {
       ++selection.temporal_attempts;
-      if (!pairs
-               .emplace(std::min(order[p], order[p + delta]),
-                        std::max(order[p], order[p + delta]))
-               .second) {
+      const InputPair pair{std::min(order[p], order[p + delta]),
+                           std::max(order[p], order[p + delta])};
+      if (!pairs.emplace(pair).second) {
         ++selection.duplicate_candidates;
+      } else {
+        const double distance =
+            (CameraCenter(poses[pair.first]) - CameraCenter(poses[pair.second]))
+                .norm();
+        selection.candidate_metadata.emplace(
+            pair,
+            PairSelection::CandidateMetadata{
+                true,
+                delta,
+                distance,
+                RotationDifferenceDegrees(poses[pair.first],
+                                          poses[pair.second])});
       }
     }
   }
@@ -831,7 +854,8 @@ PairSelection BuildPairs(
       if (p == q || (p > q ? p - q : q - p) <= temporal) continue;
       ++selection.revisit_attempts;
       const double distance = (center - CameraCenter(poses[order[q]])).norm();
-      const double angle = RotationDifferenceDegrees(poses[order[p]], poses[order[q]]);
+      const double angle =
+          RotationDifferenceDegrees(poses[order[p]], poses[order[q]]);
       if (distance < config.revisit_min_translation_meters) {
         ++selection.revisit_rejected_below_min_translation;
       } else if (distance > config.revisit_max_translation_meters) {
@@ -850,8 +874,19 @@ PairSelection BuildPairs(
     for (size_t i = 0; i < limit; ++i) {
       const uint32_t q = std::get<2>(candidates[i]);
       ++selection.revisit_selected_directed;
-      if (!pairs.emplace(std::min(order[p], q), std::max(order[p], q)).second) {
+      const InputPair pair{std::min(order[p], q), std::max(order[p], q)};
+      if (!pairs.emplace(pair).second) {
         ++selection.duplicate_candidates;
+      } else {
+        selection.candidate_metadata.emplace(
+            pair,
+            PairSelection::CandidateMetadata{
+                false,
+                static_cast<uint32_t>(std::abs(
+                    static_cast<int64_t>(config.images[order[p]].order_index) -
+                    static_cast<int64_t>(config.images[q].order_index))),
+                std::get<0>(candidates[i]),
+                RotationDifferenceDegrees(poses[order[p]], poses[q])});
       }
     }
   }
@@ -859,12 +894,93 @@ PairSelection BuildPairs(
   selection.generated_unique_pairs = generated.size();
   selection.generated_graph = SummarizePairGraph(config.num_images, generated);
   if (!generated.empty()) selection.last_generated_pair = generated.back();
-  selection.pairs = generated;
-  if (selection.pairs.size() > config.max_image_pairs) {
-    selection.first_pair_rejected_by_cap = selection.pairs[config.max_image_pairs];
-    selection.rejected_by_pair_cap =
-        selection.pairs.size() - config.max_image_pairs;
-    selection.pairs.resize(config.max_image_pairs);
+  selection.connectivity_policy_enabled =
+      (config.flags &
+       COLMAPKIT_TRACKED_POSE_FLAG_V2_CONNECTIVITY_PAIR_SELECTION) != 0;
+  if (!selection.connectivity_policy_enabled) {
+    selection.pairs = generated;
+    if (selection.pairs.size() > config.max_image_pairs) {
+      selection.first_pair_rejected_by_cap =
+          selection.pairs[config.max_image_pairs];
+      selection.rejected_by_pair_cap =
+          selection.pairs.size() - config.max_image_pairs;
+      selection.pairs.resize(config.max_image_pairs);
+    }
+  } else {
+    if (config.max_image_pairs + 1 < config.num_images) {
+      throw std::invalid_argument(
+          "Connectivity-aware pair selection requires at least N-1 pairs.");
+    }
+    std::vector<InputPair> ranked = generated;
+    const auto canonical_orders = [&](const InputPair& pair) {
+      const auto a = config.images[pair.first].order_index;
+      const auto b = config.images[pair.second].order_index;
+      return std::pair<uint32_t, uint32_t>{std::min(a, b), std::max(a, b)};
+    };
+    std::sort(ranked.begin(),
+              ranked.end(),
+              [&](const InputPair& lhs, const InputPair& rhs) {
+                const auto& l = selection.candidate_metadata.at(lhs);
+                const auto& r = selection.candidate_metadata.at(rhs);
+                if (l.temporal != r.temporal) return l.temporal > r.temporal;
+                if (l.temporal) {
+                  if (l.order_separation != r.order_separation) {
+                    return l.order_separation > r.order_separation;
+                  }
+                } else {
+                  if (l.pose_rotation_degrees != r.pose_rotation_degrees) {
+                    return l.pose_rotation_degrees < r.pose_rotation_degrees;
+                  }
+                  if (l.pose_distance_meters != r.pose_distance_meters) {
+                    return l.pose_distance_meters < r.pose_distance_meters;
+                  }
+                }
+                return canonical_orders(lhs) < canonical_orders(rhs);
+              });
+    std::vector<uint32_t> parents(config.num_images);
+    std::iota(parents.begin(), parents.end(), 0);
+    const auto find_root = [&](uint32_t image) {
+      while (parents[image] != image) {
+        parents[image] = parents[parents[image]];
+        image = parents[image];
+      }
+      return image;
+    };
+    std::set<InputPair> selected;
+    uint32_t components = config.num_images;
+    for (const InputPair& pair : ranked) {
+      const uint32_t a = find_root(pair.first);
+      const uint32_t b = find_root(pair.second);
+      if (a == b) continue;
+      parents[b] = a;
+      selected.insert(pair);
+      --components;
+      if (components == 1) break;
+    }
+    if (components != 1) {
+      throw std::invalid_argument(
+          "Connectivity-aware pair selection could not connect all images.");
+    }
+    selection.connectivity_backbone_pairs = selected.size();
+    for (const InputPair& pair : ranked) {
+      if (selected.size() >= config.max_image_pairs) break;
+      selected.insert(pair);
+    }
+    selection.pairs.assign(selected.begin(), selected.end());
+    selection.rejected_by_pair_cap = generated.size() - selection.pairs.size();
+    for (const InputPair& pair : ranked) {
+      if (selected.find(pair) == selected.end()) {
+        selection.first_pair_rejected_by_cap = pair;
+        break;
+      }
+    }
+  }
+  for (const InputPair& pair : selection.pairs) {
+    if (selection.candidate_metadata.at(pair).temporal) {
+      ++selection.selected_temporal_pairs;
+    } else {
+      ++selection.selected_revisit_pairs;
+    }
   }
   selection.selected_graph =
       SummarizePairGraph(config.num_images, selection.pairs);
@@ -1195,8 +1311,8 @@ void AppendGraphSummaryJSON(std::ostringstream& out,
       std::accumulate(summary.degrees.begin(), summary.degrees.end(), uint64_t{0});
   out << "{\"components\":" << summary.components
       << ",\"isolated_images\":" << summary.isolated_images
-      << ",\"largest_component_images\":"
-      << summary.largest_component_images << ",\"minimum_degree\":"
+      << ",\"largest_component_images\":" << summary.largest_component_images
+      << ",\"minimum_degree\":"
       << (minimum == summary.degrees.end() ? 0 : *minimum)
       << ",\"maximum_degree\":"
       << (maximum == summary.degrees.end() ? 0 : *maximum)
@@ -1228,12 +1344,24 @@ std::string PairGraphTelemetryJSON(
         << JsonEscape(RelativeImageName(config.images[pair->second])) << "\"}";
   };
   out << "{\n    \"enabled_by_flag\": true,\n"
-      << "    \"selection_order\": \"lexicographic_input_index\",\n"
-      << "    \"attempted\": {\"temporal\":"
-      << selection.temporal_attempts << ",\"revisit\":"
-      << selection.revisit_attempts << "},\n"
-      << "    \"generated_unique_pairs\": "
-      << selection.generated_unique_pairs << ",\n"
+      << "    \"selection_order\": \""
+      << (selection.connectivity_policy_enabled
+              ? "connectivity_backbone_temporal_baseline_v1"
+              : "lexicographic_input_index")
+      << "\",\n";
+  if (selection.connectivity_policy_enabled) {
+    out << "    \"selection_policy\": {\"identity\":"
+           "\"connectivity_backbone_temporal_baseline_v1\","
+        << "\"pair_budget\":" << selection.pairs.size()
+        << ",\"backbone_pairs\":" << selection.connectivity_backbone_pairs
+        << ",\"selected_temporal_pairs\":" << selection.selected_temporal_pairs
+        << ",\"selected_revisit_pairs\":" << selection.selected_revisit_pairs
+        << "},\n";
+  }
+  out << "    \"attempted\": {\"temporal\":" << selection.temporal_attempts
+      << ",\"revisit\":" << selection.revisit_attempts << "},\n"
+      << "    \"generated_unique_pairs\": " << selection.generated_unique_pairs
+      << ",\n"
       << "    \"selected_pairs\": " << selection.pairs.size() << ",\n"
       << "    \"rejected\": {\"revisit_below_min_translation\":"
       << selection.revisit_rejected_below_min_translation
@@ -1251,8 +1379,8 @@ std::string PairGraphTelemetryJSON(
       << matching.pairs_rejected_by_geometric_verification << "},\n"
       << "    \"revisit_selected_directed\": "
       << selection.revisit_selected_directed << ",\n"
-      << "    \"pairs_with_raw_matches\": "
-      << matching.pairs_with_raw_matches << ",\n"
+      << "    \"pairs_with_raw_matches\": " << matching.pairs_with_raw_matches
+      << ",\n"
       << "    \"pairs_accepted_by_geometric_verification\": "
       << matching.pairs_accepted_by_geometric_verification << ",\n"
       << "    \"first_pair_rejected_by_cap\": ";
@@ -1289,8 +1417,17 @@ std::string PairGraphTelemetryJSON(
     out << "      {\"a_order_index\":" << config.images[a].order_index
         << ",\"b_order_index\":" << config.images[b].order_index
         << ",\"a_image\":\"" << JsonEscape(RelativeImageName(config.images[a]))
-        << "\",\"b_image\":\"" << JsonEscape(RelativeImageName(config.images[b]))
-        << "\",\"raw_matches\":" << matching.raw_matches_per_pair[p]
+        << "\",\"b_image\":\""
+        << JsonEscape(RelativeImageName(config.images[b])) << "\"";
+    if (selection.connectivity_policy_enabled) {
+      const auto& metadata = selection.candidate_metadata.at({a, b});
+      out << ",\"candidate_class\":\""
+          << (metadata.temporal ? "temporal" : "revisit")
+          << "\",\"order_separation\":" << metadata.order_separation
+          << ",\"pose_distance_meters\":" << metadata.pose_distance_meters
+          << ",\"pose_rotation_degrees\":" << metadata.pose_rotation_degrees;
+    }
+    out << ",\"raw_matches\":" << matching.raw_matches_per_pair[p]
         << ",\"verified_inliers\":" << matching.verified_inliers_per_pair[p]
         << ",\"final_shared_points\":"
         << reconstruction.shared_points_per_pair[p]
