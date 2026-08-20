@@ -53,6 +53,7 @@
     "peakResidentBytes": [391675904, 400195584]
   },
   "failedGates": [
+    "observations per point 3.0529977491303457 is below 3.360419",
     "both diagnostic-enabled runs exceed 374896640 peak resident bytes",
     "sparse-model hashes differ between repeats",
     "refined-pose hashes differ between repeats"

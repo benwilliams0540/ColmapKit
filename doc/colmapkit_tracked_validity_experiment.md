@@ -146,19 +146,20 @@ observations, and catastrophic tail. No additional candidate was run.
 | Total seconds | 10.300108 | 10.428092 | 10.258667 | 10.098915 |
 | Peak resident bytes | 379,043,840 | 393,134,080 | 391,675,904 | 400,195,584 |
 
-The candidate deletes only point 8,557 and its two observations. It therefore
-clears cheirality, finite-error, catastrophic-tail, error-quality, geometry,
-workload-deletion, matching, and wall-clock gates. Its exact selected pair
-list remains
+The candidate deletes only point 8,557 and its two observations. It clears
+cheirality, finite-error, catastrophic-tail, error-quality, point/observation
+count, workload-deletion, matching, and wall-clock gates. Its exact selected
+pair list remains
 `ca94102b0c4e3b20182ce9656354d471c309234988ed8ec21380f9890089dac6`.
 All discrete metrics are identical and floating metrics agree far inside
 `1e-9` relative tolerance.
 
-It fails two predeclared gates:
+It fails three predeclared gates:
 
-1. both diagnostic-enabled candidate runs exceed the 374,896,640-byte RSS
+1. observations per point remain 3.052998, below the 3.360419 geometry floor;
+2. both diagnostic-enabled candidate runs exceed the 374,896,640-byte RSS
    ceiling; and
-2. sparse-model and refined-pose hashes differ between candidate repeats.
+3. sparse-model and refined-pose hashes differ between candidate repeats.
 
 The final candidate-source control with diagnostics and repair disabled uses
 365,084,672 peak bytes, but it is not a candidate measurement and cannot be
