@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "owner": "ColmapKit",
+  "consumerThread": "01a01c06-9a9d-7362-a8f0-2e287b4f3576",
+  "branch": "integrate/upstream-main-2026-08",
+  "decision": "reject",
+  "candidate": {
+    "identity": "post_ba_negative_depth_filter_v1",
+    "implementationCommit": "9efa893625e888422efcc763fec3ba24e22d732a",
+    "flag": "COLMAPKIT_TRACKED_POSE_FLAG_V2_POST_BA_NEGATIVE_DEPTH_FILTER",
+    "flagValue": 8,
+    "defaultEnabled": false,
+    "configSize": 160,
+    "resultSize": 1208,
+    "package": null
+  },
+  "diagnosis": {
+    "firstInvalidBoundary": "post_bundle_adjustment_cheirality",
+    "point3DID": 8557,
+    "track": [
+      {"orderIndex": 86, "image": "frame_0087.jpg", "point2DIndex": 514},
+      {"orderIndex": 87, "image": "frame_0088.jpg", "point2DIndex": 535}
+    ],
+    "directPairSelected": false,
+    "directFeatureCorrespondence": false,
+    "reachableWithinCompletionTransitivityFive": true,
+    "completionChangedTrack": false,
+    "mergeChangedTrack": false,
+    "preBAMeanPointError": 61.747748545531778,
+    "preBANonpositiveDepthObservations": 0,
+    "postBANonpositiveDepthObservations": 2,
+    "postBAMaxPointError": 1.3407807929942596e154
+  },
+  "candidateResult": {
+    "runs": 2,
+    "selectedPairs": 200,
+    "verifiedPairs": 199,
+    "registeredImages": 104,
+    "points": 9774,
+    "observations": 29840,
+    "observationsPerPoint": 3.0529977491303457,
+    "filterReportedCount": 1,
+    "actualDeletedPoints": 1,
+    "actualDeletedObservations": 2,
+    "nonpositiveDepthObservations": 0,
+    "nonfiniteErrors": 0,
+    "catastrophicErrors": 0,
+    "finalMeanReprojectionErrorRun1": 1.7489105254357498,
+    "finalMeanReprojectionErrorRun2": 1.7489105254357431,
+    "pointErrorP99": 7.04372431673566,
+    "pointErrorMaximum": 43.785172432447474,
+    "totalSeconds": [10.258667292, 10.098915083],
+    "peakResidentBytes": [391675904, 400195584]
+  },
+  "failedGates": [
+    "both diagnostic-enabled runs exceed 374896640 peak resident bytes",
+    "sparse-model hashes differ between repeats",
+    "refined-pose hashes differ between repeats"
+  ],
+  "input": {
+    "captureManifestSHA256": "0ab979b4214b86a1aeb04f680f2e06040707123694c7bacd6309a073398983b6",
+    "imageSetSHA256": "1171459bec06367752f4ebcd16e63c1afdc8ec5d055b35fde2ea8e633c24567c",
+    "imageCount": 104,
+    "depthUsed": false,
+    "fallbackUsed": false
+  },
+  "evidence": {
+    "root": "/Users/brw/Developer/ai-projects/colmap/build/codex-artifacts/tracked-pose-validity-boundary",
+    "runnerSHA256": "f2b1fd04fda8a6b901e411bd75b64b751c9b38c3b365eed1ed690e4c12b2d471",
+    "candidateRun1ManifestSHA256": "3818cbefa5944737e83f9085a3664e0464863dfa8dd2b8ca14c8654d09cda511",
+    "candidateRun2ManifestSHA256": "35f396b820877bb2b1bf2598d661d8b4b806d94bb203d74b6f5eab6c51143d29",
+    "candidateRun1PointsSHA256": "00978e718c425d25698cc33039d8a9d97d458c27965fbbfb56a0e83f2a707189",
+    "candidateRun2PointsSHA256": "d0ae903ba91c51b0334beeee9141ad1cb0916b9bdc646ece11021c7cf4fd7aad",
+    "candidateRun1RefinedPosesSHA256": "2d501231247fc8798b744e47134a4c34c435d00e866648f9ef7ba0d7f7b74d1d",
+    "candidateRun2RefinedPosesSHA256": "15c27319fc98aa191cbf3bec2ba81db830b6ada10f3f06f3d3ff7a214b35a942"
+  },
+  "consumerAction": "Do not integrate, package, pin, device-test, or train from this candidate.",
+  "nextBoundaryUnstarted": "Deterministic four-thread BA output and production-representative resource proof without retained in-memory geometry snapshots.",
+  "publication": "none",
+  "directThreadDelivery": {
+    "status": "connector_unavailable",
+    "fallback": "committed_owner_repo_receipt"
+  }
+}
