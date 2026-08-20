@@ -25,7 +25,8 @@ set(COLMAPKIT_PRIVATE_LINK_LIBS
 COLMAP_ADD_LIBRARY(
     NAME colmap_colmapkit
     SRCS
-        colmapkit.h colmapkit.cc colmapkit_v2.cc model_postprocessing.cc
+        colmapkit.h colmapkit.cc colmapkit_v2.cc frame_feature_extraction.cc
+        frame_feature_extraction_internal.h model_postprocessing.cc
     PUBLIC_LINK_LIBS
         ${COLMAPKIT_PUBLIC_LINK_LIBS}
     PRIVATE_LINK_LIBS
@@ -44,6 +45,7 @@ if(COLMAPKIT_FRAMEWORK_ENABLED)
     add_library(ColmapKit SHARED
         colmapkit.cc
         colmapkit_v2.cc
+        frame_feature_extraction.cc
         model_postprocessing.cc
         ${COLMAPKIT_PUBLIC_HEADER}
     )
@@ -138,6 +140,14 @@ COLMAP_ADD_TEST(
     NAME colmapkit_v2_test
     SRCS
         colmapkit_v2_test.cc
+    LINK_LIBS
+        colmap_colmapkit
+)
+
+COLMAP_ADD_TEST(
+    NAME frame_feature_extraction_test
+    SRCS
+        frame_feature_extraction_test.cc
     LINK_LIBS
         colmap_colmapkit
 )

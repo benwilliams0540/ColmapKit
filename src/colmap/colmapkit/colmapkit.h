@@ -420,6 +420,160 @@ typedef struct ColmapKitRGBPriorResultV2 {
 typedef struct ColmapKitTrackedPoseJobV2 ColmapKitTrackedPoseJobV2;
 typedef struct ColmapKitRGBPriorJobV2 ColmapKitRGBPriorJobV2;
 
+// Per-frame feature extraction is an independent, additive operation family.
+// It does not assign COLMAP image/database identifiers and does not alter the
+// released sparse-reconstruction ABI.
+#define COLMAPKIT_FRAME_FEATURE_ABI_VERSION_V1 1u
+#define COLMAPKIT_FRAME_FEATURE_ARTIFACT_SCHEMA_VERSION_V1 1u
+#define COLMAPKIT_FRAME_FEATURE_SOURCE_IDENTITY_CAPACITY 512
+
+typedef enum ColmapKitFrameFeatureBackendV1 {
+  COLMAPKIT_FRAME_FEATURE_BACKEND_V1_CPU = 1,
+  COLMAPKIT_FRAME_FEATURE_BACKEND_V1_METAL = 2
+} ColmapKitFrameFeatureBackendV1;
+
+typedef enum ColmapKitFrameImageFormatV1 {
+  COLMAPKIT_FRAME_IMAGE_FORMAT_V1_JPEG = 1
+} ColmapKitFrameImageFormatV1;
+
+typedef enum ColmapKitFrameOrientationV1 {
+  COLMAPKIT_FRAME_ORIENTATION_V1_UP = 1
+} ColmapKitFrameOrientationV1;
+
+typedef enum ColmapKitSIFTNormalizationV1 {
+  COLMAPKIT_SIFT_NORMALIZATION_V1_L1_ROOT = 0,
+  COLMAPKIT_SIFT_NORMALIZATION_V1_L2 = 1
+} ColmapKitSIFTNormalizationV1;
+
+typedef enum ColmapKitFrameFeatureProgressStageV1 {
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_QUEUED = 0,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_VALIDATING = 1,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_DECODING = 2,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_PREPROCESSING = 3,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_EXTRACTING = 4,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_SERIALIZING = 5,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_FINISHED = 6,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_FAILED = 7,
+  COLMAPKIT_FRAME_FEATURE_PROGRESS_V1_CANCELLED = 8
+} ColmapKitFrameFeatureProgressStageV1;
+
+typedef struct ColmapKitFrameFeatureProgressEventV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t stage;
+  uint32_t reserved0;
+  double fraction;
+  double elapsed_seconds;
+  uint64_t current;
+  uint64_t total;
+  uint64_t admitted_memory_bytes;
+  const char* message;
+  const char* detail;
+} ColmapKitFrameFeatureProgressEventV1;
+
+typedef void (*ColmapKitFrameFeatureProgressCallbackV1)(
+    const ColmapKitFrameFeatureProgressEventV1* event, void* user_data);
+
+typedef struct ColmapKitFrameFeatureErrorV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t error_code;
+  uint32_t reserved0;
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitFrameFeatureErrorV1;
+
+typedef struct ColmapKitFrameFeatureExtractorConfigV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t requested_backend;
+  uint32_t worker_count;
+  uint64_t max_encoded_image_bytes;
+  uint64_t memory_admission_budget_bytes;
+  uint32_t max_image_size;
+  uint32_t max_num_features;
+  int32_t first_octave;
+  uint32_t num_octaves;
+  uint32_t octave_resolution;
+  uint32_t max_num_orientations;
+  uint32_t upright;
+  uint32_t normalization;
+  double peak_threshold;
+  double edge_threshold;
+  uint32_t reserved[4];
+} ColmapKitFrameFeatureExtractorConfigV1;
+
+typedef struct ColmapKitFrameMetadataV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t image_format;
+  uint32_t encoded_width;
+  uint32_t encoded_height;
+  uint32_t orientation;
+  uint32_t camera_model;
+  uint32_t num_camera_params;
+  double camera_params[8];
+  uint32_t reserved[4];
+} ColmapKitFrameMetadataV1;
+
+typedef struct ColmapKitFrameFeatureInputV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t stable_frame_id;
+  uint64_t frame_revision;
+  const uint8_t* encoded_image_bytes;
+  uint64_t encoded_image_size;
+  const char* expected_image_sha256;
+  ColmapKitFrameMetadataV1 metadata;
+  const char* output_artifact_path;
+  ColmapKitFrameFeatureProgressCallbackV1 progress_callback;
+  void* progress_user_data;
+} ColmapKitFrameFeatureInputV1;
+
+typedef struct ColmapKitFrameFeatureArtifactExpectationV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t stable_frame_id;
+  uint64_t frame_revision;
+  const char* expected_image_sha256;
+  const char* expected_metadata_sha256;
+  const char* artifact_path;
+} ColmapKitFrameFeatureArtifactExpectationV1;
+
+typedef struct ColmapKitFrameFeatureResultV1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t status;
+  uint32_t actual_backend;
+  uint32_t no_fallback_satisfied;
+  uint32_t effective_worker_count;
+  uint64_t stable_frame_id;
+  uint64_t frame_revision;
+  uint32_t encoded_width;
+  uint32_t encoded_height;
+  uint32_t processed_width;
+  uint32_t processed_height;
+  uint64_t feature_count;
+  uint64_t descriptor_bytes;
+  uint64_t admitted_memory_bytes;
+  uint64_t peak_resident_memory_bytes;
+  double decode_seconds;
+  double preprocess_seconds;
+  double extraction_seconds;
+  double serialization_seconds;
+  double total_seconds;
+  char image_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char metadata_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char profile_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char payload_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char artifact_sha256[COLMAPKIT_SHA256_CAPACITY];
+  char source_identity[COLMAPKIT_FRAME_FEATURE_SOURCE_IDENTITY_CAPACITY];
+  char message[COLMAPKIT_MESSAGE_CAPACITY];
+} ColmapKitFrameFeatureResultV1;
+
+typedef struct ColmapKitFrameFeatureExtractorV1
+    ColmapKitFrameFeatureExtractorV1;
+typedef struct ColmapKitFrameFeatureJobV1 ColmapKitFrameFeatureJobV1;
+
 COLMAPKIT_EXPORT const char* ColmapKitVersion(void);
 
 COLMAPKIT_EXPORT uint32_t ColmapKitGetABIVersionV2(void);
@@ -482,6 +636,28 @@ COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitRGBGaussianPriorV2(
     ColmapKitRGBPriorJobV2* job, ColmapKitRGBPriorResultV2* result);
 COLMAPKIT_EXPORT void ColmapKitReleaseRGBGaussianPriorJobV2(
     ColmapKitRGBPriorJobV2* job);
+
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCreateFrameFeatureExtractorV1(
+    const ColmapKitFrameFeatureExtractorConfigV1* config,
+    ColmapKitFrameFeatureExtractorV1** extractor,
+    ColmapKitFrameFeatureErrorV1* error);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitStartFrameFeatureExtractionV1(
+    ColmapKitFrameFeatureExtractorV1* extractor,
+    const ColmapKitFrameFeatureInputV1* input,
+    ColmapKitFrameFeatureJobV1** job,
+    ColmapKitFrameFeatureErrorV1* error);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitCancelFrameFeatureExtractionV1(
+    ColmapKitFrameFeatureJobV1* job, ColmapKitFrameFeatureErrorV1* error);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitWaitFrameFeatureExtractionV1(
+    ColmapKitFrameFeatureJobV1* job, ColmapKitFrameFeatureResultV1* result);
+COLMAPKIT_EXPORT void ColmapKitReleaseFrameFeatureJobV1(
+    ColmapKitFrameFeatureJobV1* job);
+COLMAPKIT_EXPORT void ColmapKitReleaseFrameFeatureExtractorV1(
+    ColmapKitFrameFeatureExtractorV1* extractor);
+COLMAPKIT_EXPORT ColmapKitStatus ColmapKitValidateFrameFeatureArtifactV1(
+    const ColmapKitFrameFeatureExtractorV1* extractor,
+    const ColmapKitFrameFeatureArtifactExpectationV1* expectation,
+    ColmapKitFrameFeatureResultV1* result);
 
 #ifdef __cplusplus
 }
