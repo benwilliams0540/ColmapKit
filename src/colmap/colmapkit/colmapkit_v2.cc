@@ -1439,6 +1439,352 @@ std::string PairGraphTelemetryJSON(
   return out.str();
 }
 
+using DiagnosticObservationKey = std::pair<colmap::image_t, colmap::point2D_t>;
+
+struct GeometryDiagnosticObservation {
+  colmap::image_t image_id = colmap::kInvalidImageId;
+  colmap::point2D_t point2D_idx = colmap::kInvalidPoint2DIdx;
+  Eigen::Vector2d xy = Eigen::Vector2d::Zero();
+  double depth = 0.0;
+  double reprojection_error = 0.0;
+};
+
+struct GeometryDiagnosticPoint {
+  colmap::point3D_t point3D_id = colmap::kInvalidPoint3DId;
+  Eigen::Vector3d xyz = Eigen::Vector3d::Zero();
+  double mean_reprojection_error = 0.0;
+  std::vector<GeometryDiagnosticObservation> observations;
+};
+
+struct GeometryDiagnosticSnapshot {
+  std::string stage;
+  uint64_t operation_changes = 0;
+  uint64_t observations = 0;
+  uint64_t nonpositive_depth_observations = 0;
+  uint64_t near_zero_depth_observations = 0;
+  uint64_t nonfinite_depth_observations = 0;
+  uint64_t nonfinite_error_observations = 0;
+  uint64_t observations_above_four_pixels = 0;
+  uint64_t observations_above_catastrophic_threshold = 0;
+  std::vector<double> finite_observation_errors;
+  uint64_t nonfinite_point_errors = 0;
+  uint64_t points_above_catastrophic_threshold = 0;
+  std::vector<double> finite_point_errors;
+  std::map<colmap::point3D_t, GeometryDiagnosticPoint> points;
+  std::map<DiagnosticObservationKey, colmap::point3D_t> observation_to_point;
+};
+
+GeometryDiagnosticSnapshot CaptureGeometryDiagnosticSnapshot(
+    const std::string& stage,
+    const uint64_t operation_changes,
+    const colmap::Reconstruction& reconstruction) {
+  GeometryDiagnosticSnapshot snapshot;
+  snapshot.stage = stage;
+  snapshot.operation_changes = operation_changes;
+  const auto point3D_id_set = reconstruction.Point3DIds();
+  std::vector<colmap::point3D_t> point3D_ids(point3D_id_set.begin(),
+                                             point3D_id_set.end());
+  std::sort(point3D_ids.begin(), point3D_ids.end());
+  for (const auto point3D_id : point3D_ids) {
+    const auto& source = reconstruction.Point3D(point3D_id);
+    GeometryDiagnosticPoint point;
+    point.point3D_id = point3D_id;
+    point.xyz = source.xyz;
+    point.observations.reserve(source.track.Length());
+    double error_sum = 0.0;
+    bool all_errors_finite = true;
+    for (const auto& element : source.track.Elements()) {
+      const auto& image = reconstruction.Image(element.image_id);
+      const auto& point2D = image.Point2D(element.point2D_idx);
+      const double depth = (image.CamFromWorld() * source.xyz).z();
+      const double error = std::sqrt(colmap::CalculateSquaredReprojectionError(
+          point2D.xy, source.xyz, image.CamFromWorld(), *image.CameraPtr()));
+      point.observations.push_back(GeometryDiagnosticObservation{
+          element.image_id, element.point2D_idx, point2D.xy, depth, error});
+      snapshot.observation_to_point.emplace(
+          DiagnosticObservationKey{element.image_id, element.point2D_idx},
+          point3D_id);
+      ++snapshot.observations;
+      if (!std::isfinite(depth)) {
+        ++snapshot.nonfinite_depth_observations;
+      } else {
+        if (depth <= 0.0) ++snapshot.nonpositive_depth_observations;
+        if (std::abs(depth) < 1e-8) ++snapshot.near_zero_depth_observations;
+      }
+      if (!std::isfinite(error)) {
+        all_errors_finite = false;
+        ++snapshot.nonfinite_error_observations;
+      } else {
+        error_sum += error;
+        snapshot.finite_observation_errors.push_back(error);
+        if (error > 4.0) ++snapshot.observations_above_four_pixels;
+        if (error > 1e3) {
+          ++snapshot.observations_above_catastrophic_threshold;
+        }
+      }
+    }
+    if (point.observations.empty()) {
+      point.mean_reprojection_error = 0.0;
+    } else if (all_errors_finite && std::isfinite(error_sum)) {
+      point.mean_reprojection_error = error_sum / point.observations.size();
+    } else {
+      point.mean_reprojection_error = std::numeric_limits<double>::infinity();
+    }
+    if (std::isfinite(point.mean_reprojection_error)) {
+      snapshot.finite_point_errors.push_back(point.mean_reprojection_error);
+      if (point.mean_reprojection_error > 1e3) {
+        ++snapshot.points_above_catastrophic_threshold;
+      }
+    } else {
+      ++snapshot.nonfinite_point_errors;
+    }
+    snapshot.points.emplace(point3D_id, std::move(point));
+  }
+  std::sort(snapshot.finite_observation_errors.begin(),
+            snapshot.finite_observation_errors.end());
+  std::sort(snapshot.finite_point_errors.begin(),
+            snapshot.finite_point_errors.end());
+  return snapshot;
+}
+
+double DiagnosticQuantile(const std::vector<double>& sorted_values,
+                          const double quantile) {
+  if (sorted_values.empty()) return 0.0;
+  const size_t index = static_cast<size_t>(
+      std::floor(quantile * static_cast<double>(sorted_values.size() - 1)));
+  return sorted_values[index];
+}
+
+void AppendDiagnosticNumberJSON(std::ostringstream& out, const double value) {
+  if (std::isfinite(value)) {
+    out << value;
+  } else {
+    out << "null";
+  }
+}
+
+void AppendGeometryDiagnosticSnapshotSummaryJSON(
+    std::ostringstream& out, const GeometryDiagnosticSnapshot& snapshot) {
+  const double maximum = snapshot.finite_observation_errors.empty()
+                             ? 0.0
+                             : snapshot.finite_observation_errors.back();
+  const double point_maximum = snapshot.finite_point_errors.empty()
+                                   ? 0.0
+                                   : snapshot.finite_point_errors.back();
+  out << "{\"stage\":\"" << JsonEscape(snapshot.stage)
+      << "\",\"operation_changes\":" << snapshot.operation_changes
+      << ",\"points\":" << snapshot.points.size()
+      << ",\"observations\":" << snapshot.observations
+      << ",\"nonpositive_depth_observations\":"
+      << snapshot.nonpositive_depth_observations
+      << ",\"near_zero_depth_observations\":"
+      << snapshot.near_zero_depth_observations
+      << ",\"nonfinite_depth_observations\":"
+      << snapshot.nonfinite_depth_observations
+      << ",\"nonfinite_error_observations\":"
+      << snapshot.nonfinite_error_observations
+      << ",\"observations_above_four_pixels\":"
+      << snapshot.observations_above_four_pixels
+      << ",\"observations_above_catastrophic_threshold\":"
+      << snapshot.observations_above_catastrophic_threshold
+      << ",\"nonfinite_point_errors\":" << snapshot.nonfinite_point_errors
+      << ",\"points_above_catastrophic_threshold\":"
+      << snapshot.points_above_catastrophic_threshold << ",\"error_median\":"
+      << DiagnosticQuantile(snapshot.finite_observation_errors, 0.5)
+      << ",\"error_p95\":"
+      << DiagnosticQuantile(snapshot.finite_observation_errors, 0.95)
+      << ",\"error_p99\":"
+      << DiagnosticQuantile(snapshot.finite_observation_errors, 0.99)
+      << ",\"error_maximum\":" << maximum << ",\"point_error_median\":"
+      << DiagnosticQuantile(snapshot.finite_point_errors, 0.5)
+      << ",\"point_error_p95\":"
+      << DiagnosticQuantile(snapshot.finite_point_errors, 0.95)
+      << ",\"point_error_p99\":"
+      << DiagnosticQuantile(snapshot.finite_point_errors, 0.99)
+      << ",\"point_error_maximum\":" << point_maximum << '}';
+}
+
+void AppendGeometryDiagnosticTransitionJSON(
+    std::ostringstream& out,
+    const GeometryDiagnosticSnapshot& before,
+    const GeometryDiagnosticSnapshot& after) {
+  uint64_t added_observations = 0;
+  uint64_t deleted_observations = 0;
+  uint64_t reassigned_observations = 0;
+  uint64_t multi_parent_points = 0;
+  for (const auto& [observation, after_point] : after.observation_to_point) {
+    const auto previous = before.observation_to_point.find(observation);
+    if (previous == before.observation_to_point.end()) {
+      ++added_observations;
+    } else if (previous->second != after_point) {
+      ++reassigned_observations;
+    }
+  }
+  for (const auto& [observation, _] : before.observation_to_point) {
+    if (after.observation_to_point.find(observation) ==
+        after.observation_to_point.end()) {
+      ++deleted_observations;
+    }
+  }
+  for (const auto& [after_point_id, after_point] : after.points) {
+    std::set<colmap::point3D_t> parents;
+    for (const auto& observation : after_point.observations) {
+      const auto previous = before.observation_to_point.find(
+          {observation.image_id, observation.point2D_idx});
+      if (previous != before.observation_to_point.end()) {
+        parents.insert(previous->second);
+      }
+    }
+    if (parents.size() > 1) ++multi_parent_points;
+    (void)after_point_id;
+  }
+  out << "{\"from\":\"" << JsonEscape(before.stage) << "\",\"to\":\""
+      << JsonEscape(after.stage)
+      << "\",\"added_observations\":" << added_observations
+      << ",\"deleted_observations\":" << deleted_observations
+      << ",\"reassigned_observations\":" << reassigned_observations
+      << ",\"multi_parent_points\":" << multi_parent_points << '}';
+}
+
+std::string GeometryDiagnosticsJSON(
+    const ColmapKitTrackedPoseConfigV2& config,
+    const std::vector<InputPair>& selected_pairs,
+    const std::vector<colmap::image_t>& image_ids,
+    const colmap::CorrespondenceGraph& correspondence_graph,
+    const std::vector<GeometryDiagnosticSnapshot>& snapshots) {
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << std::setprecision(17);
+  out << "{\n    \"enabled_by_flag\": true,\n"
+      << "    \"catastrophic_error_threshold_pixels\": 1000,\n"
+      << "    \"snapshots\": [\n";
+  for (size_t i = 0; i < snapshots.size(); ++i) {
+    out << "      ";
+    AppendGeometryDiagnosticSnapshotSummaryJSON(out, snapshots[i]);
+    out << (i + 1 == snapshots.size() ? "\n" : ",\n");
+  }
+  out << "    ],\n    \"transitions\": [\n";
+  for (size_t i = 1; i < snapshots.size(); ++i) {
+    out << "      ";
+    AppendGeometryDiagnosticTransitionJSON(out, snapshots[i - 1], snapshots[i]);
+    out << (i + 1 == snapshots.size() ? "\n" : ",\n");
+  }
+  out << "    ],\n    \"post_ba_anomalies\": [\n";
+  if (!snapshots.empty()) {
+    const auto& final = snapshots.back();
+    bool first_anomaly = true;
+    std::unordered_map<colmap::image_t, uint32_t> input_by_image_id;
+    for (uint32_t i = 0; i < image_ids.size(); ++i) {
+      input_by_image_id.emplace(image_ids[i], i);
+    }
+    std::set<InputPair> selected(selected_pairs.begin(), selected_pairs.end());
+    for (const auto& [point3D_id, point] : final.points) {
+      if (std::isfinite(point.mean_reprojection_error) &&
+          point.mean_reprojection_error <= 1e3) {
+        continue;
+      }
+      if (!first_anomaly) out << ",\n";
+      first_anomaly = false;
+      out << "      {\"point3D_id\":" << point3D_id << ",\"xyz\":[";
+      AppendDiagnosticNumberJSON(out, point.xyz.x());
+      out << ',';
+      AppendDiagnosticNumberJSON(out, point.xyz.y());
+      out << ',';
+      AppendDiagnosticNumberJSON(out, point.xyz.z());
+      out << "],\"mean_reprojection_error\":";
+      AppendDiagnosticNumberJSON(out, point.mean_reprojection_error);
+      out << ",\"observations\":[";
+      for (size_t o = 0; o < point.observations.size(); ++o) {
+        const auto& observation = point.observations[o];
+        const uint32_t input = input_by_image_id.at(observation.image_id);
+        out << "{\"order_index\":" << config.images[input].order_index
+            << ",\"image\":\""
+            << JsonEscape(RelativeImageName(config.images[input]))
+            << "\",\"point2D_idx\":" << observation.point2D_idx << ",\"xy\":["
+            << observation.xy.x() << ',' << observation.xy.y()
+            << "],\"depth\":";
+        AppendDiagnosticNumberJSON(out, observation.depth);
+        out << ",\"reprojection_error\":";
+        AppendDiagnosticNumberJSON(out, observation.reprojection_error);
+        out << ",\"timeline\":[";
+        for (size_t s = 0; s < snapshots.size(); ++s) {
+          const auto owner = snapshots[s].observation_to_point.find(
+              {observation.image_id, observation.point2D_idx});
+          out << "{\"stage\":\"" << JsonEscape(snapshots[s].stage)
+              << "\",\"point3D_id\":";
+          if (owner == snapshots[s].observation_to_point.end()) {
+            out << "null";
+          } else {
+            const auto& prior = snapshots[s].points.at(owner->second);
+            out << owner->second
+                << ",\"track_length\":" << prior.observations.size()
+                << ",\"mean_reprojection_error\":";
+            AppendDiagnosticNumberJSON(out, prior.mean_reprojection_error);
+            out << ",\"track_observations\":[";
+            for (size_t p = 0; p < prior.observations.size(); ++p) {
+              const auto& prior_observation = prior.observations[p];
+              const uint32_t prior_input =
+                  input_by_image_id.at(prior_observation.image_id);
+              out << "{\"order_index\":"
+                  << config.images[prior_input].order_index
+                  << ",\"point2D_idx\":" << prior_observation.point2D_idx << '}'
+                  << (p + 1 == prior.observations.size() ? "" : ",");
+            }
+            out << ']';
+          }
+          out << '}' << (s + 1 == snapshots.size() ? "" : ",");
+        }
+        out << "]}" << (o + 1 == point.observations.size() ? "" : ",");
+      }
+      out << "],\"observation_pairs\":[";
+      bool first_pair = true;
+      for (size_t a = 0; a < point.observations.size(); ++a) {
+        for (size_t b = a + 1; b < point.observations.size(); ++b) {
+          if (!first_pair) out << ',';
+          first_pair = false;
+          const auto& obs_a = point.observations[a];
+          const auto& obs_b = point.observations[b];
+          const uint32_t input_a = input_by_image_id.at(obs_a.image_id);
+          const uint32_t input_b = input_by_image_id.at(obs_b.image_id);
+          const InputPair input_pair{std::min(input_a, input_b),
+                                     std::max(input_a, input_b)};
+          bool direct_correspondence = false;
+          const auto direct = correspondence_graph.FindCorrespondences(
+              obs_a.image_id, obs_a.point2D_idx);
+          for (const auto* corr = direct.beg; corr != direct.end; ++corr) {
+            if (corr->image_id == obs_b.image_id &&
+                corr->point2D_idx == obs_b.point2D_idx) {
+              direct_correspondence = true;
+              break;
+            }
+          }
+          std::vector<colmap::CorrespondenceGraph::Correspondence> transitive;
+          correspondence_graph.ExtractTransitiveCorrespondences(
+              obs_a.image_id, obs_a.point2D_idx, 5, &transitive);
+          const bool transitive_correspondence = std::any_of(
+              transitive.begin(), transitive.end(), [&](const auto& corr) {
+                return corr.image_id == obs_b.image_id &&
+                       corr.point2D_idx == obs_b.point2D_idx;
+              });
+          out << "{\"a_order_index\":" << config.images[input_a].order_index
+              << ",\"b_order_index\":" << config.images[input_b].order_index
+              << ",\"selected_direct_pair\":"
+              << (selected.find(input_pair) != selected.end() ? "true"
+                                                              : "false")
+              << ",\"direct_feature_correspondence\":"
+              << (direct_correspondence ? "true" : "false")
+              << ",\"reachable_within_completion_transitivity\":"
+              << (transitive_correspondence ? "true" : "false") << '}';
+        }
+      }
+      out << "]}";
+    }
+    if (!first_anomaly) out << '\n';
+  }
+  out << "    ]\n  }";
+  return out.str();
+}
+
 ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
                            Cancellation* cancellation,
                            ColmapKitTrackedPoseResultV2* result) {
@@ -1584,9 +1930,9 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
               keypoint.Rescale(scale_x, scale_y);
             }
           }
-          extracted_features[i] = ExtractedFeatures{
-              std::move(color_bitmap), std::move(keypoints),
-              std::move(descriptors)};
+          extracted_features[i] = ExtractedFeatures{std::move(color_bitmap),
+                                                    std::move(keypoints),
+                                                    std::move(descriptors)};
         }
       } catch (...) {
         stop_feature_workers.store(true, std::memory_order_release);
@@ -1614,22 +1960,31 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
       bounded_color_bitmaps[i] = std::move(features.color_bitmap);
       database->WriteKeypoints(image_ids[i], features.keypoints);
       database->WriteDescriptors(image_ids[i], features.descriptors);
-      Emit(config.progress_callback, config.progress_user_data,
-           COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION, overall_start,
+      Emit(config.progress_callback,
+           config.progress_user_data,
+           COLMAPKIT_PROGRESS_STAGE_V2_FEATURE_EXTRACTION,
+           overall_start,
            "Extracting bounded RGB features.",
-           static_cast<double>(p + 1) / order.size(), p + 1, order.size(),
+           static_cast<double>(p + 1) / order.size(),
+           p + 1,
+           order.size(),
            RelativeImageName(config.images[i]).c_str());
     }
     local.feature_seconds = Seconds(Clock::now() - feature_start).count();
 
     const bool pair_graph_telemetry_enabled =
-        (config.flags &
-         COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY) != 0;
+        (config.flags & COLMAPKIT_TRACKED_POSE_FLAG_V2_PAIR_GRAPH_TELEMETRY) !=
+        0;
+    const bool geometry_diagnostics_enabled =
+        (config.flags & COLMAPKIT_TRACKED_POSE_FLAG_V2_GEOMETRY_DIAGNOSTICS) !=
+        0;
     const PairSelection pair_selection =
         BuildPairs(config, order, initial_poses);
     const auto& pairs = pair_selection.pairs;
-    if (pairs.empty()) throw std::runtime_error("Bounded pair selection produced no pairs.");
-    const std::filesystem::path pair_path = database_path.string() + ".v2-pairs.txt";
+    if (pairs.empty())
+      throw std::runtime_error("Bounded pair selection produced no pairs.");
+    const std::filesystem::path pair_path =
+        database_path.string() + ".v2-pairs.txt";
     std::ostringstream pair_text;
     for (const auto& [a, b] : pairs) {
       pair_text << RelativeImageName(config.images[a]) << ' '
@@ -1639,7 +1994,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
 
     colmap::ImportedPairingOptions pairing_options;
     pairing_options.match_list_path = pair_path;
-    pairing_options.block_size = std::min<int>(1225, std::max<int>(1, pairs.size()));
+    pairing_options.block_size =
+        std::min<int>(1225, std::max<int>(1, pairs.size()));
     colmap::FeatureMatchingOptions matching_options;
     matching_options.num_threads = extraction_options.num_threads;
     matching_options.use_gpu = false;
@@ -1652,8 +2008,10 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     geometry_options.ransac_options.random_seed =
         static_cast<int>(config.random_seed);
     const auto matching_start = Clock::now();
-    Emit(config.progress_callback, config.progress_user_data,
-         COLMAPKIT_PROGRESS_STAGE_V2_MATCHING, overall_start,
+    Emit(config.progress_callback,
+         config.progress_user_data,
+         COLMAPKIT_PROGRESS_STAGE_V2_MATCHING,
+         overall_start,
          "Matching the explicit bounded pair set.");
     auto matcher = colmap::CreateImagePairsFeatureMatcher(
         pairing_options, matching_options, geometry_options, database_path);
@@ -1661,7 +2019,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     local.matching_seconds = Seconds(Clock::now() - matching_start).count();
     local.matched_pairs = CountMatchedPairs(*database);
     if (local.matched_pairs == 0) {
-      throw std::runtime_error("No bounded image pair passed geometric verification.");
+      throw std::runtime_error(
+          "No bounded image pair passed geometric verification.");
     }
     PairMatchingTelemetry pair_matching_telemetry;
     if (pair_graph_telemetry_enabled) {
@@ -1687,8 +2046,10 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     }
 
     const auto triangulation_start = Clock::now();
-    Emit(config.progress_callback, config.progress_user_data,
-         COLMAPKIT_PROGRESS_STAGE_V2_TRIANGULATION, overall_start,
+    Emit(config.progress_callback,
+         config.progress_user_data,
+         COLMAPKIT_PROGRESS_STAGE_V2_TRIANGULATION,
+         overall_start,
          "Triangulating from frozen ARKit-seeded cameras.");
     colmap::IncrementalTriangulator::Options triangulation_options;
     // The sparse C-style prior remains genuinely sparse. Variant D separately
@@ -1712,20 +2073,52 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
           reconstruction.FindImageWithName(RelativeImageName(config.images[i]))
               ->ImageId());
     }
+    std::vector<GeometryDiagnosticSnapshot> geometry_diagnostic_snapshots;
     for (uint32_t pass = 0; pass < config.max_triangulation_passes; ++pass) {
       cancellation->ThrowIfRequested();
-      size_t changes = 0;
+      size_t triangulation_changes = 0;
       for (const auto image_id : stable_image_ids) {
-        changes += triangulator.TriangulateImage(triangulation_options, image_id);
+        triangulation_changes +=
+            triangulator.TriangulateImage(triangulation_options, image_id);
       }
-      changes += triangulator.CompleteAllTracks(triangulation_options);
-      changes += triangulator.MergeAllTracks(triangulation_options);
+      if (geometry_diagnostics_enabled) {
+        geometry_diagnostic_snapshots.push_back(
+            CaptureGeometryDiagnosticSnapshot(
+                "pass_" + std::to_string(pass) + "_after_triangulate_images",
+                triangulation_changes,
+                reconstruction));
+      }
+      const size_t completion_changes =
+          triangulator.CompleteAllTracks(triangulation_options);
+      if (geometry_diagnostics_enabled) {
+        geometry_diagnostic_snapshots.push_back(
+            CaptureGeometryDiagnosticSnapshot(
+                "pass_" + std::to_string(pass) + "_after_complete_tracks",
+                completion_changes,
+                reconstruction));
+      }
+      const size_t merge_changes =
+          triangulator.MergeAllTracks(triangulation_options);
+      if (geometry_diagnostics_enabled) {
+        geometry_diagnostic_snapshots.push_back(
+            CaptureGeometryDiagnosticSnapshot(
+                "pass_" + std::to_string(pass) + "_after_merge_tracks",
+                merge_changes,
+                reconstruction));
+      }
+      const size_t changes =
+          triangulation_changes + completion_changes + merge_changes;
       if (changes == 0) break;
     }
     if (reconstruction.NumPoints3D() == 0) {
-      throw std::runtime_error("Tracked-pose triangulation produced no sparse points.");
+      throw std::runtime_error(
+          "Tracked-pose triangulation produced no sparse points.");
     }
     reconstruction.UpdatePoint3DErrors();
+    if (geometry_diagnostics_enabled) {
+      geometry_diagnostic_snapshots.push_back(CaptureGeometryDiagnosticSnapshot(
+          "pre_bundle_adjustment", 0, reconstruction));
+    }
     local.initial_mean_reprojection_error =
         reconstruction.ComputeMeanReprojectionError();
     local.triangulation_seconds =
@@ -1749,7 +2142,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
     colmap::BundleAdjustmentConfig ba_config;
     for (const auto image_id : stable_image_ids) {
       ba_config.AddImage(image_id);
-      ba_config.SetConstantCamIntrinsics(reconstruction.Image(image_id).CameraId());
+      ba_config.SetConstantCamIntrinsics(
+          reconstruction.Image(image_id).CameraId());
     }
     // Two full ARKit camera frames are fixed in the optimization. This pins
     // origin, orientation, and metric baseline instead of recovering them with
@@ -1760,8 +2154,10 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
         reconstruction.Image(stable_image_ids.back()).FrameId());
     ba_config.FixGauge(colmap::BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
     const auto ba_start = Clock::now();
-    Emit(config.progress_callback, config.progress_user_data,
-         COLMAPKIT_PROGRESS_STAGE_V2_BUNDLE_ADJUSTMENT, overall_start,
+    Emit(config.progress_callback,
+         config.progress_user_data,
+         COLMAPKIT_PROGRESS_STAGE_V2_BUNDLE_ADJUSTMENT,
+         overall_start,
          "Refining while holding the ARKit gauge and metric baseline.");
     auto adjuster = colmap::CreateDefaultCeresBundleAdjuster(
         ba_options, ba_config, reconstruction);
@@ -1783,6 +2179,10 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
                                summary->BriefReport());
     }
     reconstruction.UpdatePoint3DErrors();
+    if (geometry_diagnostics_enabled) {
+      geometry_diagnostic_snapshots.push_back(CaptureGeometryDiagnosticSnapshot(
+          "post_bundle_adjustment", 0, reconstruction));
+    }
     local.bundle_adjustment_seconds = Seconds(Clock::now() - ba_start).count();
     local.final_mean_reprojection_error =
         reconstruction.ComputeMeanReprojectionError();
@@ -1879,7 +2279,8 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << "  \"rgb_hash_seconds\": " << rgb_hash_seconds << ",\n"
              << "  \"feature_extraction_worker_count\": "
              << feature_worker_count << ",\n"
-             << "  \"pose_manifest_seconds\": " << pose_manifest_seconds << ",\n"
+             << "  \"pose_manifest_seconds\": " << pose_manifest_seconds
+             << ",\n"
              << "  \"initial_mean_reprojection_error\": "
              << local.initial_mean_reprojection_error << ",\n"
              << "  \"final_mean_reprojection_error\": "
@@ -1892,9 +2293,18 @@ ColmapKitStatus RunTracked(const ColmapKitTrackedPoseConfigV2& config,
              << local.measured_scale_drift_ratio;
     if (pair_graph_telemetry_enabled) {
       evidence << ",\n  \"pair_graph_telemetry\": "
-               << PairGraphTelemetryJSON(config, pair_selection,
+               << PairGraphTelemetryJSON(config,
+                                         pair_selection,
                                          pair_matching_telemetry,
                                          reconstruction_pair_telemetry);
+    }
+    if (geometry_diagnostics_enabled) {
+      evidence << ",\n  \"geometry_diagnostics\": "
+               << GeometryDiagnosticsJSON(config,
+                                          pairs,
+                                          image_ids,
+                                          *cache->CorrespondenceGraph(),
+                                          geometry_diagnostic_snapshots);
     }
     evidence << "\n}\n";
     WriteDeterministicText(evidence_path, evidence.str());

@@ -36,11 +36,12 @@ struct OwnedImage {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 4 || argc > 6) {
+  if (argc < 4 || argc > 7) {
     std::cerr << "Usage: colmapkit_tracked_capture_runner "
                  "CAPTURE_MANIFEST OUTPUT_DIR MAX_IMAGE_PAIRS "
                  "[PAIR_GRAPH_TELEMETRY=1] "
-                 "[CONNECTIVITY_PAIR_SELECTION=0]\n";
+                 "[CONNECTIVITY_PAIR_SELECTION=0] "
+                 "[GEOMETRY_DIAGNOSTICS=0]\n";
     return 2;
   }
   const std::filesystem::path manifest_path(argv[1]);
@@ -48,7 +49,8 @@ int main(int argc, char** argv) {
   const uint32_t max_image_pairs = static_cast<uint32_t>(std::stoul(argv[3]));
   const bool pair_graph_telemetry = argc == 4 || std::stoul(argv[4]) != 0;
   const bool connectivity_pair_selection =
-      argc == 6 && std::stoul(argv[5]) != 0;
+      argc >= 6 && std::stoul(argv[5]) != 0;
+  const bool geometry_diagnostics = argc == 7 && std::stoul(argv[6]) != 0;
   std::filesystem::create_directories(output_dir);
 
   boost::property_tree::ptree manifest;
@@ -107,6 +109,9 @@ int main(int argc, char** argv) {
   if (connectivity_pair_selection) {
     config.flags |= COLMAPKIT_TRACKED_POSE_FLAG_V2_CONNECTIVITY_PAIR_SELECTION;
   }
+  if (geometry_diagnostics) {
+    config.flags |= COLMAPKIT_TRACKED_POSE_FLAG_V2_GEOMETRY_DIAGNOSTICS;
+  }
   config.images = images.data();
   config.num_images = static_cast<uint32_t>(images.size());
   config.max_features_per_image = 4096;
@@ -148,6 +153,8 @@ int main(int argc, char** argv) {
               << (pair_graph_telemetry ? "true" : "false")
               << ",\n  \"connectivity_pair_selection\": "
               << (connectivity_pair_selection ? "true" : "false")
+              << ",\n  \"geometry_diagnostics\": "
+              << (geometry_diagnostics ? "true" : "false")
               << ",\n  \"registered_images\": " << result.registered_images
               << ",\n  \"matched_pairs\": " << result.matched_pairs
               << ",\n  \"sparse_points\": " << result.sparse_points
