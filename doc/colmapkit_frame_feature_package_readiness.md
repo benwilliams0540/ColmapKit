@@ -1,9 +1,17 @@
 # ColmapKit Frame Feature Apple Package Readiness
 
-Status: local immutable candidate audited; publication and consumer pin are not
-authorized.
+Status: local immutable candidates audited; RC1 failed its predeclared physical
+admission gate. Publication and consumer pin are not authorized.
 
 ## Recommendation
+
+**Do not release or pin v0.3.0.** The superseding RC1 static package passed its
+three-slice and external-consumer audit, but the exact physical M1 iPad run was
+rejected before feature work because the frozen 256 MiB admission budget was
+smaller than the engine's 326,582,652-byte estimate. The complete classification
+and attempt hashes are in
+`doc/colmapkit_frame_feature_rc1_physical_rejection.md`. No final-version build
+was started.
 
 Use `v0.3.0` for the first release containing `FrameFeatureExtractionV1` and
 `FrameFeatureImportV1`. These are additive public operation families rather
@@ -258,32 +266,20 @@ The prior candidate remains unchanged at
 SHA-256
 `59e7d1a660d1fe3c044e9dd58adacfb1eaaa37393b9316cabf33587de5718942`.
 
-### Deferred physical procedure and release boundary
+### RC1 physical rejection and release boundary
 
-The later operator must use a dedicated owner harness, never Splats, and must
-first lock the exact device, package, fixture, frame/config, and resource
-identities described by the deferred matrix. The matrix requires extraction,
-exact validation/reuse, terminal cancellation and cleanup, transactional
-repeat import, corruption/stale/partial/conflict rejection, explicit Metal
-backend rejection with no CPU fallback, sequential lifecycle repetition, and
-5-second resource sampling. It predeclares a 5-second cancellation gate,
-768 MiB peak RSS gate, 128 MiB terminal-growth gate, and complete thermal,
-battery, charge, and Low Power Mode evidence.
+Ben authorized the bounded owner harness against the exact RC1 bytes. Attempt 1
+stopped before install at a raw-hash check because required developer signing
+changes the Mach-O signature envelope; signature-normalized executable hashes
+were byte-identical. Attempt 2 then built, installed, and launched on the
+verified unlocked wired M1 iPad, but the first extraction start rejected the
+frozen profile: 326,582,652 admitted bytes were required versus a 268,435,456
+byte budget. No feature worker, artifact, import, cancellation, lifecycle, or
+resource acceptance result followed.
 
-Only after Ben authorizes device work may the owner add/build the bounded
-harness against the recorded iPhoneOS slice, verify that the embedded framework
-hash is
-`8876954755d656e1968426d411c24ac48e87d1903ee5f449126f042f6a704eb0`,
-record the explicit M1 iPad UDID/model/iPadOS state, and install/run it once to
-a new preserved evidence directory. Any resign/rebuild that changes framework
-bytes is a new candidate. Simulator, build, install, or launch success cannot
-substitute for the physical runtime receipt, and one-device repeat identity
-cannot prove cross-device byte determinism.
-
-The present recommendation is **no release and no consumer pin**. Static
-package acceptance is complete, but physical FrameFeatureExtractionV1 and
-FrameFeatureImportV1 correctness/resource acceptance is the remaining
-user-owned gate. After that gate passes, Ben may separately authorize the
-final-version rebuild, repeat audit, tag, push, release asset/public URL,
-SwiftPM publication update, and explicit consumer pin. None of those actions
-occurred here.
+The present recommendation remains **no release and no consumer pin**. The
+rejection is a fail-closed configuration/profile mismatch, not an admission API
+defect. Any one-variable budget follow-up is a separate experiment requiring
+authorization; the rejected matrix, attempts, and RC1 bytes remain immutable.
+Tag, push, release asset/public URL, SwiftPM publication update, explicit
+consumer pin, and a final-version rebuild did not occur here.
