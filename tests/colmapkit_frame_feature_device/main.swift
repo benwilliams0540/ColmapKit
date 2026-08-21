@@ -7,6 +7,8 @@ import UIKit
 
 private let expectedRelease = "0.3.0-rc.1+c69711b8"
 private let expectedEngineCommit = "c69711b8"
+private let admissionBudgetBytes: UInt64 = 320 * 1024 * 1024
+private let maximumFixtureAdmissionEstimateBytes: UInt64 = 326_582_652
 
 private struct FixtureManifest: Codable {
   struct Frame: Codable {
@@ -62,6 +64,48 @@ private struct DatabaseSummary: Codable {
   var twoViewGeometries: Int64
   var imageIDs: [Int64]
   var cameraIDs: [Int64]
+}
+
+private struct ExtractionRequestReceipt: Codable {
+  var requestedBackend: UInt32
+  var workerCount: UInt32
+  var maxEncodedImageBytes: UInt64
+  var memoryAdmissionBudgetBytes: UInt64
+  var maximumFixtureAdmissionEstimateBytes: UInt64
+  var maxImageSize: UInt32
+  var maxNumFeatures: UInt32
+  var firstOctave: Int32
+  var numOctaves: UInt32
+  var octaveResolution: UInt32
+  var maxNumOrientations: UInt32
+  var upright: Bool
+  var normalization: UInt32
+  var peakThreshold: Double
+  var edgeThreshold: Double
+}
+
+private struct HarnessPreflightReceipt: Codable {
+  var schemaVersion: Int
+  var releaseVersion: String
+  var engineBuildIdentity: String
+  var fixtureManifestSHA256: String
+  var request: ExtractionRequestReceipt
+  var device: DeviceBoundary
+  var residentBytes: UInt64
+  var profileSHA256: String?
+  var profileAvailability: String
+}
+
+private struct HarnessFailureReceipt: Codable {
+  var schemaVersion: Int
+  var message: String
+  var releaseVersion: String
+  var engineBuildIdentity: String
+  var device: DeviceBoundary
+  var residentBytes: UInt64
+  var request: ExtractionRequestReceipt
+  var profileSHA256: String?
+  var profileAvailability: String
 }
 
 private struct ExtractionReceipt: Codable {
@@ -122,6 +166,7 @@ private struct DeviceResult: Codable {
   var engineBuildIdentity: String
   var fixtureManifestSHA256: String
   var fixtures: [FixtureManifest.Frame]
+  var request: ExtractionRequestReceipt
   var deviceStart: DeviceBoundary
   var deviceEnd: DeviceBoundary
   var extractions: [ExtractionReceipt]
@@ -266,6 +311,22 @@ private final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
         fflush(stdout)
         exit(EXIT_SUCCESS)
       } catch {
+        let failure = HarnessFailureReceipt(
+          schemaVersion: 1,
+          message: error.localizedDescription,
+          releaseVersion: String(cString: ColmapKitGetReleaseVersionV2()),
+          engineBuildIdentity: String(cString: ColmapKitGetEngineBuildIdentityV2()),
+          device: currentDeviceBoundary(),
+          residentBytes: currentResidentBytes(),
+          request: extractionRequestReceipt(FrameFeatureDeviceHarness.extractorConfig()),
+          profileSHA256: nil,
+          profileAvailability: "Unavailable until a feature result reaches a profile-bearing terminal boundary."
+        )
+        if let data = try? JSONEncoder().encode(failure) {
+          print(
+            "COLMAPKIT_FRAME_FEATURE_DEVICE_FAILURE=\(String(decoding: data, as: UTF8.self))"
+          )
+        }
         print("COLMAPKIT_FRAME_FEATURE_DEVICE_ERROR=\(error.localizedDescription)")
         fflush(stdout)
         exit(EXIT_FAILURE)
@@ -313,10 +374,6 @@ private enum FrameFeatureDeviceHarness {
     guard deviceStart.availableCapacityBytes >= 2 * 1024 * 1024 * 1024 else {
       throw HarnessError.failed("Refusing to start with less than 2 GiB available storage.")
     }
-    let residentStart = currentResidentBytes()
-    let sampler = ResourceSampler()
-    sampler.start()
-
     guard let fixtureRoot = Bundle.main.url(forResource: "Fixture", withExtension: nil) else {
       throw HarnessError.failed("Fixture directory is absent from the app bundle.")
     }
@@ -334,6 +391,26 @@ private enum FrameFeatureDeviceHarness {
         throw HarnessError.failed("Fixture identity mismatch: \(frame.filename)")
       }
     }
+    let request = extractionRequestReceipt(extractorConfig())
+    let residentStart = currentResidentBytes()
+    let preflight = HarnessPreflightReceipt(
+      schemaVersion: 1,
+      releaseVersion: releaseVersion,
+      engineBuildIdentity: engineBuildIdentity,
+      fixtureManifestSHA256: sha256(manifestData),
+      request: request,
+      device: deviceStart,
+      residentBytes: residentStart,
+      profileSHA256: nil,
+      profileAvailability: "Available from successful extraction/import result receipts."
+    )
+    let preflightData = try JSONEncoder().encode(preflight)
+    print(
+      "COLMAPKIT_FRAME_FEATURE_DEVICE_PREFLIGHT=\(String(decoding: preflightData, as: UTF8.self))"
+    )
+    fflush(stdout)
+    let sampler = ResourceSampler()
+    sampler.start()
 
     let runRoot = FileManager.default.temporaryDirectory
       .appendingPathComponent("colmapkit-frame-feature-\(UUID().uuidString)", isDirectory: true)
@@ -479,6 +556,7 @@ private enum FrameFeatureDeviceHarness {
       engineBuildIdentity: engineBuildIdentity,
       fixtureManifestSHA256: sha256(manifestData),
       fixtures: manifest.frames,
+      request: request,
       deviceStart: deviceStart,
       deviceEnd: currentDeviceBoundary(),
       extractions: extractionReceipts,
@@ -501,7 +579,7 @@ private enum FrameFeatureDeviceHarness {
     )
   }
 
-  private static func extractorConfig(
+  fileprivate static func extractorConfig(
     backend: ColmapKitFrameFeatureBackendV1 = COLMAPKIT_FRAME_FEATURE_BACKEND_V1_CPU
   ) -> ColmapKitFrameFeatureExtractorConfigV1 {
     var config = ColmapKitFrameFeatureExtractorConfigV1()
@@ -510,7 +588,7 @@ private enum FrameFeatureDeviceHarness {
     config.requested_backend = backend.rawValue
     config.worker_count = 1
     config.max_encoded_image_bytes = 16 * 1024 * 1024
-    config.memory_admission_budget_bytes = 256 * 1024 * 1024
+    config.memory_admission_budget_bytes = admissionBudgetBytes
     config.max_image_size = 1024
     config.max_num_features = 4096
     config.first_octave = -1
@@ -1185,6 +1263,28 @@ private enum FrameFeatureDeviceHarness {
 
 private extension Data.SubSequence {
   var data: Data { Data(self) }
+}
+
+private func extractionRequestReceipt(
+  _ config: ColmapKitFrameFeatureExtractorConfigV1
+) -> ExtractionRequestReceipt {
+  ExtractionRequestReceipt(
+    requestedBackend: config.requested_backend,
+    workerCount: config.worker_count,
+    maxEncodedImageBytes: config.max_encoded_image_bytes,
+    memoryAdmissionBudgetBytes: config.memory_admission_budget_bytes,
+    maximumFixtureAdmissionEstimateBytes: maximumFixtureAdmissionEstimateBytes,
+    maxImageSize: config.max_image_size,
+    maxNumFeatures: config.max_num_features,
+    firstOctave: config.first_octave,
+    numOctaves: config.num_octaves,
+    octaveResolution: config.octave_resolution,
+    maxNumOrientations: config.max_num_orientations,
+    upright: config.upright == 1,
+    normalization: config.normalization,
+    peakThreshold: config.peak_threshold,
+    edgeThreshold: config.edge_threshold
+  )
 }
 
 private func fixedCString<T>(_ value: inout T) -> String {

@@ -14,6 +14,7 @@ EXPECTED_FRAMEWORK_SHA256=8876954755d656e1968426d411c24ac48e87d1903ee5f449126f04
 EXPECTED_ZIP_SHA256=e7e69b029715bfe4f63551c05fdc9851ef565844f216669b5e0fbea5ba8a5aa3
 EXPECTED_MATRIX_SHA256=47071bd7ef9a2a94dab5b991faec97e5f998646049514c1cfd3582262c6f086d
 EXPECTED_RELEASE=0.3.0-rc.1+c69711b8
+EXPECTED_ADMISSION_BUDGET_BYTES=335544320
 MODE="${COLMAPKIT_DEVICE_MODE:-build}"
 XCODE_PROJECT_ROOT="$BUILD_ROOT/xcode"
 DERIVED_DATA_ROOT="$BUILD_ROOT/derived-data"
@@ -151,6 +152,7 @@ fi
   printf 'embedded_signature_normalized_sha256=%s\n' "$embedded_normalized_sha256"
   printf 'zip_sha256=%s\n' "$EXPECTED_ZIP_SHA256"
   printf 'matrix_sha256=%s\n' "$EXPECTED_MATRIX_SHA256"
+  printf 'memory_admission_budget_bytes=%s\n' "$EXPECTED_ADMISSION_BUDGET_BYTES"
   printf 'fixture_manifest_sha256=%s\n' \
     "$(shasum -a 256 "$FIXTURE_DIR/fixture-manifest.json" | awk '{print $1}')"
   printf 'app=%s\n' "$APP_PATH"
@@ -174,6 +176,26 @@ xcrun devicectl device process launch \
   "$BUNDLE_ID" 2>&1 | tee "$LOG_PATH"
 launch_status=${PIPESTATUS[0]}
 set -e
+xcrun devicectl device info lockState --device "$DEVICE_ID" \
+  > "$RESULT_ROOT/device-lock-state-after.txt" 2>&1
+xcrun devicectl device info processes --device "$DEVICE_ID" \
+  > "$RESULT_ROOT/device-processes-after.txt" 2>&1
+if grep -Fq 'COLMAPKIT_FRAME_FEATURE_DEVICE_PREFLIGHT=' "$LOG_PATH"; then
+  grep -F 'COLMAPKIT_FRAME_FEATURE_DEVICE_PREFLIGHT=' "$LOG_PATH" \
+    | tail -n 1 \
+    | sed 's/^.*COLMAPKIT_FRAME_FEATURE_DEVICE_PREFLIGHT=//' \
+    > "$RESULT_ROOT/preflight.json"
+  python3 -m json.tool "$RESULT_ROOT/preflight.json" \
+    > "$RESULT_ROOT/preflight.pretty.json"
+fi
+if grep -Fq 'COLMAPKIT_FRAME_FEATURE_DEVICE_FAILURE=' "$LOG_PATH"; then
+  grep -F 'COLMAPKIT_FRAME_FEATURE_DEVICE_FAILURE=' "$LOG_PATH" \
+    | tail -n 1 \
+    | sed 's/^.*COLMAPKIT_FRAME_FEATURE_DEVICE_FAILURE=//' \
+    > "$RESULT_ROOT/failure.json"
+  python3 -m json.tool "$RESULT_ROOT/failure.json" \
+    > "$RESULT_ROOT/failure.pretty.json"
+fi
 if [[ "$launch_status" -ne 0 ]]; then
   echo "error: Frame-feature harness exited with status $launch_status." >&2
   exit "$launch_status"
