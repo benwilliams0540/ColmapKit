@@ -10,6 +10,10 @@ set(COLMAPKIT_SOURCE_REVISION "" CACHE STRING
     "Exact source identity embedded in ColmapKit runtime evidence")
 set(COLMAPKIT_RELEASE_VERSION "0.3.0-dev" CACHE STRING
     "ColmapKit package release identity embedded in the public ABI")
+set(COLMAPKIT_FRAMEWORK_VERSION "0.3.0" CACHE STRING
+    "Numeric Apple framework marketing version")
+set(COLMAPKIT_FRAMEWORK_BUILD_VERSION "1" CACHE STRING
+    "Numeric Apple framework build version")
 set(COLMAPKIT_PUBLIC_LINK_LIBS
     colmap_controllers
     colmap_exe
@@ -58,6 +62,9 @@ if(COLMAPKIT_FRAMEWORK_ENABLED)
         FRAMEWORK TRUE
         FRAMEWORK_VERSION A
         MACOSX_FRAMEWORK_IDENTIFIER org.colmap.ColmapKit
+        MACOSX_FRAMEWORK_BUNDLE_NAME ColmapKit
+        MACOSX_FRAMEWORK_BUNDLE_VERSION "${COLMAPKIT_FRAMEWORK_BUILD_VERSION}"
+        MACOSX_FRAMEWORK_SHORT_VERSION_STRING "${COLMAPKIT_FRAMEWORK_VERSION}"
         OUTPUT_NAME ColmapKit
         PUBLIC_HEADER "${COLMAPKIT_PUBLIC_HEADER}"
         FOLDER ${COLMAP_TARGETS_ROOT_FOLDER}/${FOLDER_NAME}
