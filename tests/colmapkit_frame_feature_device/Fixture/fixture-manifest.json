@@ -1,0 +1,47 @@
+{
+  "cameraModel": "PINHOLE",
+  "cameraParameters": [
+    900.0,
+    900.0,
+    512.0,
+    384.0
+  ],
+  "encoder": "sips jpeg formatOptions 100",
+  "frames": [
+    {
+      "bytes": 2859198,
+      "filename": "frame-01.jpg",
+      "frameRevision": 1,
+      "height": 768,
+      "imageName": "capture/frame-01.jpg",
+      "seed": 1,
+      "sha256": "2b22ced55baccd6493e49d8b5086367c34c952ec63399ea5e96c3dd52ace1767",
+      "stableFrameID": 10,
+      "width": 1024
+    },
+    {
+      "bytes": 2804621,
+      "filename": "frame-02.jpg",
+      "frameRevision": 1,
+      "height": 768,
+      "imageName": "capture/frame-02.jpg",
+      "seed": 2,
+      "sha256": "45c47baa3b4242576b694ce292eb8d9eef38398a12b8f5ed31a559f8371d156a",
+      "stableFrameID": 20,
+      "width": 1024
+    },
+    {
+      "bytes": 2808790,
+      "filename": "frame-03.jpg",
+      "frameRevision": 1,
+      "height": 768,
+      "imageName": "capture/frame-03.jpg",
+      "seed": 3,
+      "sha256": "83067fdd42d5eda3e9592b28677770a228f52b7207f8a9b055c4ae6442447c77",
+      "stableFrameID": 30,
+      "width": 1024
+    }
+  ],
+  "generator": "generate_colmapkit_frame_feature_device_fixtures.py",
+  "schemaVersion": 1
+}
