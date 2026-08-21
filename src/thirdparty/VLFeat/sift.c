@@ -665,6 +665,10 @@ Gaussian window size is set to have standard deviation
 #include <math.h>
 #include <stdio.h>
 
+#if defined(VL_SIFT_USE_MMAP_WORKSPACE)
+#include <sys/mman.h>
+#endif
+
 /** @internal @brief Use bilinear interpolation to compute orientations */
 #define VL_SIFT_BILINEAR_ORIENTATIONS 1
 
@@ -676,6 +680,43 @@ double expn_tab [EXPN_SZ+1] ; /**< ::fast_expn table      @internal */
 #define NBP 4
 
 #define log2(x) (log(x)/VL_LOG_OF_2)
+
+/** ------------------------------------------------------------------
+ ** @internal @brief Allocate the fixed image-scale workspace
+ **
+ ** Apple malloc retains the first-octave SIFT high-water pages after the
+ ** filter is destroyed. Anonymous mappings preserve the same byte-addressable
+ ** workspace while allowing destruction to release those pages immediately.
+ ** Other VLFeat allocations and non-Apple builds keep the configured VLFeat
+ ** allocator.
+ **/
+
+static void *
+vl_sift_workspace_malloc (size_t size)
+{
+#if defined(VL_SIFT_USE_MMAP_WORKSPACE)
+  void * memory = mmap(NULL,
+                       size,
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON,
+                       -1,
+                       0) ;
+  return memory == MAP_FAILED ? NULL : memory ;
+#else
+  return vl_malloc(size) ;
+#endif
+}
+
+static void
+vl_sift_workspace_free (void * memory, size_t size)
+{
+  if (! memory) return ;
+#if defined(VL_SIFT_USE_MMAP_WORKSPACE)
+  munmap(memory, size) ;
+#else
+  vl_free(memory) ;
+#endif
+}
 
 /** ------------------------------------------------------------------
  ** @internal
@@ -881,6 +922,19 @@ vl_sift_new (int width, int height,
   int h   = VL_SHIFT_LEFT (height, -o_min) ;
   int nel = w * h ;
 
+  size_t tempSize = sizeof(vl_sift_pix) * nel ;
+  size_t octaveSize = sizeof(vl_sift_pix) * nel * (nlevels + 3) ;
+  size_t dogSize = sizeof(vl_sift_pix) * nel * (nlevels + 2) ;
+  size_t gradSize = sizeof(vl_sift_pix) * nel * 2 * (nlevels + 2) ;
+
+  if (! f) return NULL ;
+  f->temp = NULL ;
+  f->octave = NULL ;
+  f->dog = NULL ;
+  f->grad = NULL ;
+  f->gaussFilter = NULL ;
+  f->keys = NULL ;
+
   /* negative value O => calculate max. value */
   if (noctaves < 0) {
     noctaves = VL_MAX (floor (log2 (VL_MIN(width, height))) - o_min - 3, 1) ;
@@ -895,13 +949,19 @@ vl_sift_new (int width, int height,
   f-> s_max   = nlevels + 1 ;
   f-> o_cur   = o_min ;
 
-  f-> temp    = vl_malloc (sizeof(vl_sift_pix) * nel    ) ;
-  f-> octave  = vl_malloc (sizeof(vl_sift_pix) * nel
-                        * (f->s_max - f->s_min + 1)  ) ;
-  f-> dog     = vl_malloc (sizeof(vl_sift_pix) * nel
-                        * (f->s_max - f->s_min    )  ) ;
-  f-> grad    = vl_malloc (sizeof(vl_sift_pix) * nel * 2
-                        * (f->s_max - f->s_min    )  ) ;
+  f-> temp    = vl_sift_workspace_malloc (tempSize) ;
+  f-> octave  = vl_sift_workspace_malloc (octaveSize) ;
+  f-> dog     = vl_sift_workspace_malloc (dogSize) ;
+  f-> grad    = vl_sift_workspace_malloc (gradSize) ;
+
+  if (! f->temp || ! f->octave || ! f->dog || ! f->grad) {
+    vl_sift_workspace_free (f->grad, gradSize) ;
+    vl_sift_workspace_free (f->dog, dogSize) ;
+    vl_sift_workspace_free (f->octave, octaveSize) ;
+    vl_sift_workspace_free (f->temp, tempSize) ;
+    vl_free (f) ;
+    return NULL ;
+  }
 
   f-> sigman  = 0.5 ;
   f-> sigmak  = pow (2.0, 1.0 / nlevels) ;
@@ -946,11 +1006,21 @@ void
 vl_sift_delete (VlSiftFilt* f)
 {
   if (f) {
+    int w = VL_SHIFT_LEFT (f->width, -f->o_min) ;
+    int h = VL_SHIFT_LEFT (f->height, -f->o_min) ;
+    int nel = w * h ;
+    size_t tempSize = sizeof(vl_sift_pix) * nel ;
+    size_t octaveSize = sizeof(vl_sift_pix) * nel
+                      * (f->s_max - f->s_min + 1) ;
+    size_t dogSize = sizeof(vl_sift_pix) * nel
+                   * (f->s_max - f->s_min) ;
+    size_t gradSize = sizeof(vl_sift_pix) * nel * 2
+                    * (f->s_max - f->s_min) ;
     if (f->keys) vl_free (f->keys) ;
-    if (f->grad) vl_free (f->grad) ;
-    if (f->dog) vl_free (f->dog) ;
-    if (f->octave) vl_free (f->octave) ;
-    if (f->temp) vl_free (f->temp) ;
+    vl_sift_workspace_free (f->grad, gradSize) ;
+    vl_sift_workspace_free (f->dog, dogSize) ;
+    vl_sift_workspace_free (f->octave, octaveSize) ;
+    vl_sift_workspace_free (f->temp, tempSize) ;
     if (f->gaussFilter) vl_free (f->gaussFilter) ;
     vl_free (f) ;
   }

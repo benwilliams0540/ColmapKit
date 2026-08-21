@@ -111,6 +111,10 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_vlfeat
     SRCS ${VLFEAT_SOURCE_FILES}
 )
+if(APPLE)
+    target_compile_definitions(colmap_vlfeat PRIVATE
+        VL_SIFT_USE_MMAP_WORKSPACE)
+endif()
 if(OPENMP_FOUND)
     target_link_libraries(colmap_vlfeat PRIVATE OpenMP::OpenMP_C)
 endif()
