@@ -177,3 +177,113 @@ are:
 No physical-device run, push, pull request, remote CI, tag, release,
 publication, consumer edit, consumer repin, or default change occurred in this
 audit.
+
+## Final local v0.3.0 RC1 static acceptance
+
+Status: statically retained on 2026-08-20; **not physically accepted, not
+releasable, and not consumable**. Ben deferred the physical iPad gate after it
+was initially authorized. No device was queried, no `devicectl` command was
+run, and no app or harness was installed or launched on an iPad or iPhone.
+
+### Exact candidate
+
+The final local candidate was rebuilt from the clean final owner commit
+`c69711b89848a7ffe0b8933ea8636f87be8c1c50`, with an empty source-patch hash,
+profiling disabled, and SIFT Metal disabled. It did not overwrite or relabel
+the older `695ace6f` candidate.
+
+- Runtime identity: `0.3.0-rc.1+c69711b8`
+- XCFramework:
+  `/Users/brw/Developer/ai-projects/colmap/dist/colmapkit-v0.3.0-rc1-c69711b8/ColmapKit.xcframework`
+- ZIP:
+  `/Users/brw/Developer/ai-projects/colmap/dist/colmapkit-v0.3.0-rc1-c69711b8/ColmapKit.xcframework.zip`
+- ZIP bytes: `43212429`
+- ZIP SHA-256 and SwiftPM checksum:
+  `e7e69b029715bfe4f63551c05fdc9851ef565844f216669b5e0fbea5ba8a5aa3`
+- macOS binary SHA-256:
+  `0f5bf0620b176ffa5ba4990c0c5e42e81a556e5aa3ad5bbb4d3852186104495c`
+- iPhoneOS binary SHA-256:
+  `8876954755d656e1968426d411c24ac48e87d1903ee5f449126f042f6a704eb0`
+- Simulator binary SHA-256:
+  `5a7279e921745e18fb295c4451817a6a750986a665de5acab140204aee049a14`
+- Public-header SHA-256:
+  `41fd5cfea9c168fd33ab7443ffbbfb9d1007e550cd04ea4c7d2b8908778aab1f`
+- Module-map SHA-256:
+  `d0af903600e0e3dcc4846ace8a88fcf64698daa36b489ce9a41aedfa60a0b9be`
+- Third-party-notices SHA-256:
+  `82b6522d3fba08354eff2d3c5dc77266c4c0d30b406374ab45b208f5f229d0a4`
+- Deferred physical matrix SHA-256:
+  `47071bd7ef9a2a94dab5b991faec97e5f998646049514c1cfd3582262c6f086d`
+
+The exact package summary and complete audit set are under
+`dist/colmapkit-v0.3.0-rc1-c69711b8/`. The predeclared later-device procedure,
+fixtures/configuration lock, operation sequence, evidence requirements, and
+quantitative retain/reject gates are in
+`deferred-physical-acceptance-matrix.md` in that directory.
+
+### Independent static evidence
+
+The canonical package build and a separate readback established:
+
+- macOS arm64 minimum 15.0, iPhoneOS arm64 minimum 18.0, and iOS Simulator
+  arm64 minimum 18.0, all built with SDK 26.5;
+- framework name/version/build `ColmapKit` / `0.3.0` / `1`, valid bound
+  `Info.plist` metadata, and valid ad-hoc framework signatures;
+- byte-identical headers, module maps, and 34-symbol export manifests across
+  all slices;
+- iOS system-only linkage and one framework-local `libomp.dylib` on macOS,
+  with no Homebrew, user, temporary, host-SDK, or macOS-only iOS load path;
+- no packaged `sift.metallib`, and `PROFILING_ENABLED=OFF` plus
+  `SIFT_METAL_ENABLED=OFF` in all three configured build caches;
+- identical consolidated notices from 126 license inputs;
+- an independent ZIP extraction with all 24 file hashes identical to the
+  directory candidate, valid archive signatures, and matching `shasum` and
+  `swift package compute-checksum` values;
+- fresh external SwiftPM consumer builds for macOS, iPhoneOS, and Simulator;
+- a released-v0.2.1-header C client compiling, linking, and running against the
+  new macOS framework with unchanged sparse config/result sizes `136`/`1088`;
+- packaged runtime identity reporting ABI 2, release
+  `0.3.0-rc.1+c69711b8`, and engine commit `c69711b8` on macOS; and
+- focused `colmapkit_v2_test`, `frame_feature_extraction_test`, and
+  `frame_feature_import_test` passing 3/3 in 4.03 seconds.
+
+The first package invocation stopped before compilation because the restricted
+sandbox could not resolve GitHub for the pinned PoseLib archive. The identical
+command was rerun with normal network access and completed. This was an
+environmental fetch failure, not a source, ABI, or artifact failure; no bytes
+from the stopped attempt were accepted.
+
+The prior candidate remains unchanged at
+`dist/colmapkit-v0.3.0-o3-candidate-695ace6f/ColmapKit.xcframework.zip` with
+SHA-256
+`59e7d1a660d1fe3c044e9dd58adacfb1eaaa37393b9316cabf33587de5718942`.
+
+### Deferred physical procedure and release boundary
+
+The later operator must use a dedicated owner harness, never Splats, and must
+first lock the exact device, package, fixture, frame/config, and resource
+identities described by the deferred matrix. The matrix requires extraction,
+exact validation/reuse, terminal cancellation and cleanup, transactional
+repeat import, corruption/stale/partial/conflict rejection, explicit Metal
+backend rejection with no CPU fallback, sequential lifecycle repetition, and
+5-second resource sampling. It predeclares a 5-second cancellation gate,
+768 MiB peak RSS gate, 128 MiB terminal-growth gate, and complete thermal,
+battery, charge, and Low Power Mode evidence.
+
+Only after Ben authorizes device work may the owner add/build the bounded
+harness against the recorded iPhoneOS slice, verify that the embedded framework
+hash is
+`8876954755d656e1968426d411c24ac48e87d1903ee5f449126f042f6a704eb0`,
+record the explicit M1 iPad UDID/model/iPadOS state, and install/run it once to
+a new preserved evidence directory. Any resign/rebuild that changes framework
+bytes is a new candidate. Simulator, build, install, or launch success cannot
+substitute for the physical runtime receipt, and one-device repeat identity
+cannot prove cross-device byte determinism.
+
+The present recommendation is **no release and no consumer pin**. Static
+package acceptance is complete, but physical FrameFeatureExtractionV1 and
+FrameFeatureImportV1 correctness/resource acceptance is the remaining
+user-owned gate. After that gate passes, Ben may separately authorize the
+final-version rebuild, repeat audit, tag, push, release asset/public URL,
+SwiftPM publication update, and explicit consumer pin. None of those actions
+occurred here.
