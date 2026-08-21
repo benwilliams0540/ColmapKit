@@ -2,18 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-XCFRAMEWORK_PATH="${COLMAPKIT_XCFRAMEWORK_PATH:-"$ROOT_DIR/dist/colmapkit-v0.3.0-rc1-c69711b8/ColmapKit.xcframework"}"
+XCFRAMEWORK_PATH="${COLMAPKIT_XCFRAMEWORK_PATH:-"$ROOT_DIR/dist/colmapkit-v0.3.0-rc2-670a14bb/ColmapKit.xcframework"}"
 BUILD_ROOT="${COLMAPKIT_DEVICE_BUILD_ROOT:-"$ROOT_DIR/build-colmapkit-frame-feature-device"}"
 RESULT_ROOT="${COLMAPKIT_DEVICE_RESULT_ROOT:-"$ROOT_DIR/dist/colmapkit-frame-feature-device"}"
 ZIP_PATH="$(dirname "$XCFRAMEWORK_PATH")/ColmapKit.xcframework.zip"
-MATRIX_PATH="$(dirname "$XCFRAMEWORK_PATH")/deferred-physical-acceptance-matrix.md"
+MATRIX_PATH="${COLMAPKIT_DEVICE_MATRIX_PATH:-"$ROOT_DIR/doc/colmapkit_frame_feature_rc2_physical_predeclaration.md"}"
 FIXTURE_DIR="$ROOT_DIR/tests/colmapkit_frame_feature_device/Fixture"
 FRAMEWORK_PATH="$XCFRAMEWORK_PATH/ios-arm64/ColmapKit.framework"
 FRAMEWORK_BINARY="$FRAMEWORK_PATH/ColmapKit"
-EXPECTED_FRAMEWORK_SHA256=8876954755d656e1968426d411c24ac48e87d1903ee5f449126f042f6a704eb0
-EXPECTED_ZIP_SHA256=e7e69b029715bfe4f63551c05fdc9851ef565844f216669b5e0fbea5ba8a5aa3
-EXPECTED_MATRIX_SHA256=47071bd7ef9a2a94dab5b991faec97e5f998646049514c1cfd3582262c6f086d
-EXPECTED_RELEASE=0.3.0-rc.1+c69711b8
+EXPECTED_FRAMEWORK_SHA256=7e4dbc6709d0b698e4dcc783c302c87534e2b2f81f8cb43ee45463b18f2cc4ed
+EXPECTED_ZIP_SHA256=2ff308666327193012cb9b6d2974d3d58ecb3e1b2714e885bdb52c3e8cf2bf70
+EXPECTED_MATRIX_SHA256=f657d2705d3870a76e4ed50fdd3ef223f9c3aa888a8fed20e8714ecfcdea6fff
+EXPECTED_RELEASE=0.3.0-rc.2+670a14bb
 EXPECTED_ADMISSION_BUDGET_BYTES=335544320
 MODE="${COLMAPKIT_DEVICE_MODE:-build}"
 XCODE_PROJECT_ROOT="$BUILD_ROOT/xcode"
@@ -32,12 +32,12 @@ signature_normalized_sha256() {
 }
 
 if [[ ! -f "$FRAMEWORK_BINARY" ]]; then
-  echo "error: Missing exact RC1 iPhoneOS framework: $FRAMEWORK_BINARY" >&2
+  echo "error: Missing exact RC2 iPhoneOS framework: $FRAMEWORK_BINARY" >&2
   exit 1
 fi
 actual_framework_sha256="$(shasum -a 256 "$FRAMEWORK_BINARY" | awk '{print $1}')"
 if [[ "$actual_framework_sha256" != "$EXPECTED_FRAMEWORK_SHA256" ]]; then
-  echo "error: RC1 iPhoneOS framework hash mismatch." >&2
+  echo "error: RC2 iPhoneOS framework hash mismatch." >&2
   exit 1
 fi
 if [[ ! -f "$FIXTURE_DIR/fixture-manifest.json" ]]; then
@@ -45,11 +45,11 @@ if [[ ! -f "$FIXTURE_DIR/fixture-manifest.json" ]]; then
   exit 1
 fi
 if [[ "$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')" != "$EXPECTED_ZIP_SHA256" ]]; then
-  echo "error: RC1 ZIP hash mismatch." >&2
+  echo "error: RC2 ZIP hash mismatch." >&2
   exit 1
 fi
 if [[ "$(shasum -a 256 "$MATRIX_PATH" | awk '{print $1}')" != "$EXPECTED_MATRIX_SHA256" ]]; then
-  echo "error: RC1 physical matrix hash mismatch." >&2
+  echo "error: RC2 physical matrix hash mismatch." >&2
   exit 1
 fi
 if [[ "$MODE" != "build" && "$MODE" != "physical" ]]; then
@@ -137,7 +137,7 @@ if [[ "$embedded_sha256" != "$EXPECTED_FRAMEWORK_SHA256" ]]; then
       printf 'expected_signature_normalized_sha256=%s\n' "$framework_normalized_sha256"
       printf 'actual_signature_normalized_sha256=%s\n' "$embedded_normalized_sha256"
     } > "$RESULT_ROOT/failure-receipt.txt"
-    echo "error: Embedded framework differs from RC1 beyond the required signature envelope." >&2
+    echo "error: Embedded framework differs from RC2 beyond the required signature envelope." >&2
     exit 1
   fi
 fi

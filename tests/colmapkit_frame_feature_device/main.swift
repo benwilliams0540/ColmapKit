@@ -5,8 +5,8 @@ import SQLite3
 import UIKit
 @preconcurrency import ColmapKit
 
-private let expectedRelease = "0.3.0-rc.1+c69711b8"
-private let expectedEngineCommit = "c69711b8"
+private let expectedRelease = "0.3.0-rc.2+670a14bb"
+private let expectedEngineCommit = "670a14bb"
 private let admissionBudgetBytes: UInt64 = 320 * 1024 * 1024
 private let maximumFixtureAdmissionEstimateBytes: UInt64 = 325_534_076
 
@@ -439,6 +439,11 @@ private enum FrameFeatureDeviceHarness {
       extractedFrames.append(extracted)
       extractionReceipts.append(receipt(label: "primary-\(frame.stableFrameID)", frame: extracted))
       try validate(frame: extracted)
+    }
+    guard extractedFrames.first?.result.feature_count == 4096 else {
+      throw HarnessError.failed(
+        "Representative high-texture frame did not reach the repaired 4096-row terminal bound."
+      )
     }
 
     let repeatURL = runRoot.appendingPathComponent("repeat.ckfeatures")
