@@ -1,7 +1,7 @@
 # ColmapKit Frame Feature Apple Package Readiness
 
-Status: local immutable candidates audited; RC1 failed its predeclared physical
-admission gate. Publication and consumer pin are not authorized.
+Status: local immutable candidates audited; RC1 failed physical acceptance.
+Publication and consumer pin are not authorized.
 
 ## Recommendation
 
@@ -12,6 +12,14 @@ smaller than the engine's 326,582,652-byte estimate. The complete classification
 and attempt hashes are in
 `doc/colmapkit_frame_feature_rc1_physical_rejection.md`. No final-version build
 was started.
+
+The separately authorized one-variable 320 MiB follow-up then passed admission
+and completed CPU extraction, but exposed an owner artifact-contract defect:
+8,736 oriented features were serialized while the same operation's validator
+permits at most 8,192 and rejects the artifact. The complete result and attempt
+hashes are in `doc/colmapkit_frame_feature_rc1_320mib_result.md`. RC1 is not
+eligible for a final-version rebuild without a separately authorized source
+repair and new candidate identity.
 
 Use `v0.3.0` for the first release containing `FrameFeatureExtractionV1` and
 `FrameFeatureImportV1`. These are additive public operation families rather
