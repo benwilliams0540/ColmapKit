@@ -7,6 +7,7 @@ BUILD_ROOT="${COLMAPKIT_RUNTIME_BUILD_ROOT:-"$ROOT_DIR/build-colmapkit-ios-runti
 RESULT_ROOT="${COLMAPKIT_RUNTIME_RESULT_ROOT:-"$ROOT_DIR/dist/colmapkit-ios-runtime"}"
 SIMULATOR_UDID="${SIMULATOR_UDID:-}"
 IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-18.0}"
+COLMAPKIT_RUNTIME_STRICT_METAL="${COLMAPKIT_RUNTIME_STRICT_METAL:-ON}"
 BUNDLE_ID=org.colmap.ColmapKitRuntimeHarness
 APP_PATH="$BUILD_ROOT/ColmapKitRuntimeHarness.app"
 EXECUTABLE_PATH="$APP_PATH/ColmapKitRuntimeHarness"
@@ -48,11 +49,16 @@ cp "$ROOT_DIR/tests/colmapkit_ios_runtime/Info.plist" "$APP_PATH/Info.plist"
 SIMULATOR_SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
 MODULE_CACHE="$BUILD_ROOT/module-cache"
 mkdir -p "$MODULE_CACHE"
+SWIFT_DEFINES=()
+if [[ "$COLMAPKIT_RUNTIME_STRICT_METAL" != "ON" ]]; then
+  SWIFT_DEFINES=(-D COLMAPKIT_RUNTIME_SKIP_STRICT_METAL)
+fi
 xcrun --sdk iphonesimulator swiftc \
   -module-cache-path "$MODULE_CACHE" \
   -Xcc "-fmodules-cache-path=$MODULE_CACHE" \
   -sdk "$SIMULATOR_SDK" \
   -target "arm64-apple-ios${IOS_DEPLOYMENT_TARGET}-simulator" \
+  "${SWIFT_DEFINES[@]}" \
   -F "$XCFRAMEWORK_PATH/ios-arm64-simulator" \
   "$ROOT_DIR/tests/colmapkit_ios_runtime/main.swift" \
   -framework ColmapKit \

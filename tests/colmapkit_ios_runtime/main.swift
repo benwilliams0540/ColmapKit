@@ -234,10 +234,14 @@ private enum ColmapKitRuntimeHarness {
       fixtureURL: fixtureURL,
       rootURL: runRoot.appendingPathComponent("v2", isDirectory: true)
     )
-    let strictMetalCases = try runStrictMetalMatrix(
-      fixtureURL: strictFixtureURL,
-      rootURL: runRoot.appendingPathComponent("strict-metal", isDirectory: true)
-    )
+    #if COLMAPKIT_RUNTIME_SKIP_STRICT_METAL
+      let strictMetalCases: [StrictMetalRuntimeResult] = []
+    #else
+      let strictMetalCases = try runStrictMetalMatrix(
+        fixtureURL: strictFixtureURL,
+        rootURL: runRoot.appendingPathComponent("strict-metal", isDirectory: true)
+      )
+    #endif
 
     return RuntimeResult(
       version: version,
