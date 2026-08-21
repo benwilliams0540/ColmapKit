@@ -490,10 +490,13 @@ typedef struct ColmapKitFrameFeatureExtractorConfigV1 {
   uint64_t max_encoded_image_bytes;
   uint64_t memory_admission_budget_bytes;
   uint32_t max_image_size;
+  // Hard maximum number of terminal oriented keypoint/descriptor rows.
   uint32_t max_num_features;
   int32_t first_octave;
   uint32_t num_octaves;
   uint32_t octave_resolution;
+  // Maximum orientations generated per localized keypoint before the terminal
+  // row cap is applied. This does not multiply max_num_features.
   uint32_t max_num_orientations;
   uint32_t upright;
   uint32_t normalization;

@@ -55,6 +55,16 @@ admission estimate, sampled process RSS, substage and total clocks, image,
 metadata, profile, payload, and whole-artifact SHA-256 values, source identity,
 status, and message.
 
+`max_num_features` is a hard terminal-row cap for this operation. It bounds the
+oriented keypoint rows returned in `feature_count`, the aligned SIFT-128
+descriptor rows serialized in the artifact, and the rows accepted by the
+validator/importer. `max_num_orientations` bounds the orientation hypotheses
+generated for each localized SIFT keypoint before terminal selection; it does
+not multiply the artifact row cap. Raw CPU SIFT may cross its nominal localized
+keypoint target by retaining a complete DoG level, so FrameFeatureExtractionV1
+deterministically keeps the largest-scale aligned rows after extraction and
+requires `1 <= feature_count <= max_num_features`.
+
 ## Lifecycle and cancellation
 
 The context state machine is:
@@ -78,10 +88,14 @@ serializing, and one terminal finished, failed, or cancelled stage. Foreign C
 callbacks must not throw; an accidental C++ exception is contained at the ABI
 boundary.
 
-The configured memory admission estimate covers two encoded copies, a bounded
-image/SIFT working-set estimate, bounded features, and fixed overhead. It is an
-admission bound, not a promise that process RSS will equal the estimate. The
-result separately samples process resident memory on Apple platforms.
+The configured memory admission estimate covers two encoded copies, a
+conservative image/SIFT working-set estimate, the hard terminal feature rows,
+and fixed overhead. The terminal feature component is
+`max_num_features * 256` bytes; `max_num_orientations` does not multiply it.
+The larger image/SIFT component accounts conservatively for decode, pyramid,
+raw localization, and orientation work. The total is an admission accounting
+bound, not a promise that process RSS will equal the estimate. The result
+separately samples process resident memory on Apple platforms.
 
 ## `.ckfeatures` schema version 1
 
@@ -109,7 +123,8 @@ commit and removes the temporary name. It rejects a preexisting or concurrently
 appearing destination and never deletes a destination it did not create.
 
 The validator rejects truncated data, bad magic or completion, unknown schema
-or ABI versions, invalid counts or formats, nonfinite keypoints/camera values,
+or ABI versions, zero or over-`max_num_features` row counts, invalid formats,
+nonfinite keypoints/camera values,
 noncanonical metadata, payload corruption, different frame/revision/image or
 metadata identity, different extractor config, and different engine source
 identity.
@@ -142,7 +157,9 @@ artifact. CaptureSeal reconciliation is implemented by the separate
 `colmapkit/frame_feature_extraction_test` covers ABI and backend rejection,
 successful CPU extraction, same-machine repeat identity, corruption,
 truncation, unknown version, configuration and expectation mismatch,
-nonfinite data, bounded admission, cancellation and temporary cleanup,
+nonfinite data, exact and over-bound aligned terminal-row behavior, a
+high-texture orientation-expansion case, exact admission boundaries,
+cancellation and temporary cleanup,
 single-job admission, zero-feature failure, and preexisting-output preservation.
 
 This source slice does not prove cross-device byte identity, Simulator or

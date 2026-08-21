@@ -8,7 +8,7 @@ import UIKit
 private let expectedRelease = "0.3.0-rc.1+c69711b8"
 private let expectedEngineCommit = "c69711b8"
 private let admissionBudgetBytes: UInt64 = 320 * 1024 * 1024
-private let maximumFixtureAdmissionEstimateBytes: UInt64 = 326_582_652
+private let maximumFixtureAdmissionEstimateBytes: UInt64 = 325_534_076
 
 private struct FixtureManifest: Codable {
   struct Frame: Codable {
@@ -391,7 +391,14 @@ private enum FrameFeatureDeviceHarness {
         throw HarnessError.failed("Fixture identity mismatch: \(frame.filename)")
       }
     }
-    let request = extractionRequestReceipt(extractorConfig())
+    let config = extractorConfig()
+    let computedMaximumAdmission = manifest.frames.map {
+      estimatedAdmissionBytes(frame: $0, config: config)
+    }.max()
+    guard computedMaximumAdmission == maximumFixtureAdmissionEstimateBytes else {
+      throw HarnessError.failed("Fixture admission estimate contract mismatch.")
+    }
+    let request = extractionRequestReceipt(config)
     let residentStart = currentResidentBytes()
     let preflight = HarnessPreflightReceipt(
       schemaVersion: 1,
@@ -1263,6 +1270,23 @@ private enum FrameFeatureDeviceHarness {
 
 private extension Data.SubSequence {
   var data: Data { Data(self) }
+}
+
+private func estimatedAdmissionBytes(
+  frame: FixtureManifest.Frame,
+  config: ColmapKitFrameFeatureExtractorConfigV1
+) -> UInt64 {
+  let scale = min(
+    1.0,
+    Double(config.max_image_size) / Double(max(frame.width, frame.height))
+  )
+  let width = max(1, UInt64(ceil(Double(frame.width) * scale)))
+  let height = max(1, UInt64(ceil(Double(frame.height) * scale)))
+  let firstOctaveFactor: UInt64 = config.first_octave < 0 ? 4 : 1
+  return UInt64(frame.bytes) * 2
+    + width * height * firstOctaveFactor * 96
+    + UInt64(config.max_num_features) * 256
+    + 16 * 1024 * 1024
 }
 
 private func extractionRequestReceipt(

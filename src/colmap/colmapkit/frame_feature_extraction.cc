@@ -5,6 +5,7 @@
 #include "colmap/colmapkit/frame_feature_extraction_internal.h"
 #include "colmap/feature/extractor.h"
 #include "colmap/feature/sift.h"
+#include "colmap/feature/utils.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/version.h"
 
@@ -122,6 +123,17 @@ std::string FrameFeatureSHA256(const std::string_view input) {
   output << std::hex << std::setfill('0');
   for (const uint32_t word : hash) output << std::setw(8) << word;
   return output.str();
+}
+
+void ApplyFrameFeatureTerminalRowLimitV1(const uint32_t max_num_features,
+                                         FeatureKeypoints* keypoints,
+                                         FeatureDescriptors* descriptors) {
+  if (max_num_features == 0 || keypoints == nullptr || descriptors == nullptr ||
+      descriptors->data.rows() !=
+          static_cast<Eigen::Index>(keypoints->size())) {
+    throw std::invalid_argument("Invalid frame feature terminal row payload.");
+  }
+  ExtractTopScaleFeatures(keypoints, descriptors, max_num_features);
 }
 
 }  // namespace colmap::internal
@@ -477,9 +489,8 @@ uint64_t EstimateAdmittedMemory(
   const uint64_t first_octave_factor = config.first_octave < 0 ? 4 : 1;
   const uint64_t image_working_set =
       CheckedMultiply(CheckedMultiply(pixels, first_octave_factor), 96);
-  const uint64_t feature_working_set = CheckedMultiply(
-      CheckedMultiply(config.max_num_features, config.max_num_orientations),
-      256);
+  const uint64_t feature_working_set =
+      CheckedMultiply(config.max_num_features, 256);
   return CheckedAdd(
       CheckedAdd(CheckedMultiply(encoded_size, 2), image_working_set),
       CheckedAdd(feature_working_set, 16ULL * 1024ULL * 1024ULL));
@@ -921,9 +932,7 @@ colmap::internal::FrameFeatureArtifactDataV1 ParseArtifact(
   parsed.result.feature_count = reader.Read<uint64_t>();
   parsed.result.descriptor_bytes = reader.Read<uint64_t>();
   if (parsed.result.feature_count == 0 ||
-      parsed.result.feature_count >
-          CheckedMultiply(state.config.max_num_features,
-                          state.config.max_num_orientations) ||
+      parsed.result.feature_count > state.config.max_num_features ||
       parsed.result.descriptor_bytes !=
           CheckedMultiply(parsed.result.feature_count, kDescriptorDimensions)) {
     throw std::invalid_argument("Invalid frame feature counts.");
@@ -1202,6 +1211,8 @@ void RunJob(ColmapKitFrameFeatureJobV1* job) {
       throw std::runtime_error(
           "CPU SIFT returned an invalid descriptor payload.");
     }
+    colmap::internal::ApplyFrameFeatureTerminalRowLimitV1(
+        job->state->config.max_num_features, &keypoints, &descriptors);
     ScaleKeypoints(bitmap.Width(),
                    bitmap.Height(),
                    job->input.metadata.encoded_width,

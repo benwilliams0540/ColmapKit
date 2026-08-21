@@ -54,6 +54,13 @@ memory, sampled process RSS on Apple platforms, validation/database/receipt and
 total clocks, source/profile identity, counts, and receipt/database/sealed-set
 hashes.
 
+For that profile, `max_num_features` is the inclusive hard terminal count for
+oriented keypoint/descriptor rows. `max_num_orientations` controls hypotheses
+before the extractor's terminal selection and does not multiply the import
+bound. Every artifact must satisfy `1 <= feature_count <= max_num_features`;
+the importer writes exactly that many aligned keypoint and SIFT-128 descriptor
+rows and reports the same count in `imported_keypoints`.
+
 All filesystem input and output paths must be absolute, and the output parent
 directory must already exist. Sealed image names must be unique relative POSIX
 paths with no empty, dot, parent, absolute, or backslash components.

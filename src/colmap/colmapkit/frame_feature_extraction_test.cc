@@ -3,11 +3,14 @@
 
 #include "colmap/colmapkit/colmapkit.h"
 #include "colmap/colmapkit/frame_feature_extraction_internal.h"
+#include "colmap/feature/extractor.h"
+#include "colmap/feature/sift.h"
 #include "colmap/sensor/bitmap.h"
 #include "colmap/util/testing.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -53,6 +56,24 @@ void WriteBytes(const std::filesystem::path& path,
 std::string HashBytes(const std::vector<uint8_t>& bytes) {
   return internal::FrameFeatureSHA256(std::string_view(
       reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+}
+
+uint64_t ExpectedAdmissionBytes(
+    const ColmapKitFrameFeatureExtractorConfigV1& config,
+    const ColmapKitFrameMetadataV1& metadata,
+    const uint64_t encoded_size) {
+  const double scale =
+      std::min(1.0,
+               static_cast<double>(config.max_image_size) /
+                   std::max(metadata.encoded_width, metadata.encoded_height));
+  const uint64_t width = std::max<uint64_t>(
+      1, static_cast<uint64_t>(std::ceil(metadata.encoded_width * scale)));
+  const uint64_t height = std::max<uint64_t>(
+      1, static_cast<uint64_t>(std::ceil(metadata.encoded_height * scale)));
+  const uint64_t first_octave_factor = config.first_octave < 0 ? 4 : 1;
+  return encoded_size * 2 + width * height * first_octave_factor * 96 +
+         static_cast<uint64_t>(config.max_num_features) * 256 +
+         16ULL * 1024ULL * 1024ULL;
 }
 
 ColmapKitFrameFeatureExtractorConfigV1 DefaultConfig() {
@@ -235,6 +256,131 @@ TEST(FrameFeatureExtractionV1, PreservesLegacySizesAndRejectsInvalidABI) {
             COLMAPKIT_STATUS_INVALID_ARGUMENT);
 }
 
+TEST(FrameFeatureExtractionV1, AppliesHardAlignedTerminalRowLimit) {
+  FeatureKeypoints exact_keypoints;
+  exact_keypoints.emplace_back(0.0f, 0.0f, 1.0f, 0.0f);
+  exact_keypoints.emplace_back(1.0f, 1.0f, 4.0f, 0.0f);
+  exact_keypoints.emplace_back(2.0f, 2.0f, 3.0f, 0.0f);
+  exact_keypoints.emplace_back(3.0f, 3.0f, 2.0f, 0.0f);
+  FeatureDescriptors exact_descriptors;
+  exact_descriptors.type = FeatureExtractorType::SIFT;
+  exact_descriptors.data.resize(4, 128);
+  for (Eigen::Index row = 0; row < exact_descriptors.data.rows(); ++row) {
+    exact_descriptors.data.row(row).setConstant(static_cast<uint8_t>(row));
+  }
+
+  auto bounded_keypoints = exact_keypoints;
+  auto bounded_descriptors = exact_descriptors;
+  internal::ApplyFrameFeatureTerminalRowLimitV1(
+      4, &bounded_keypoints, &bounded_descriptors);
+  EXPECT_EQ(bounded_keypoints.size(), exact_keypoints.size());
+  EXPECT_TRUE(
+      (bounded_descriptors.data.array() == exact_descriptors.data.array())
+          .all());
+
+  internal::ApplyFrameFeatureTerminalRowLimitV1(
+      2, &bounded_keypoints, &bounded_descriptors);
+  ASSERT_EQ(bounded_keypoints.size(), 2u);
+  ASSERT_EQ(bounded_descriptors.data.rows(), 2);
+  EXPECT_FLOAT_EQ(bounded_keypoints[0].ComputeScale(), 4.0f);
+  EXPECT_FLOAT_EQ(bounded_keypoints[1].ComputeScale(), 3.0f);
+  EXPECT_EQ(bounded_descriptors.data(0, 0), 1);
+  EXPECT_EQ(bounded_descriptors.data(1, 0), 2);
+}
+
+TEST(FrameFeatureExtractionV1,
+     CapsHighTextureOutputAndValidatesAtTerminalBoundary) {
+  FrameFixture fixture;
+  auto config = DefaultConfig();
+  config.max_num_features = 64;
+
+  Bitmap raw_bitmap;
+  ASSERT_TRUE(raw_bitmap.Read(fixture.directory / "frame.jpg", /*as_rgb=*/false));
+  raw_bitmap.Thumbnail(config.max_image_size);
+  FeatureExtractionOptions raw_options(FeatureExtractorType::SIFT);
+  raw_options.use_gpu = false;
+  raw_options.num_threads = 1;
+  raw_options.max_image_size = config.max_image_size;
+  raw_options.sift->max_num_features = config.max_num_features;
+  raw_options.sift->first_octave = config.first_octave;
+  raw_options.sift->num_octaves = config.num_octaves;
+  raw_options.sift->octave_resolution = config.octave_resolution;
+  raw_options.sift->max_num_orientations = config.max_num_orientations;
+  raw_options.sift->upright = config.upright != 0;
+  raw_options.sift->peak_threshold = config.peak_threshold;
+  raw_options.sift->edge_threshold = config.edge_threshold;
+  auto raw_extractor = FeatureExtractor::Create(raw_options);
+  ASSERT_NE(raw_extractor, nullptr);
+  FeatureKeypoints raw_keypoints;
+  FeatureDescriptors raw_descriptors;
+  ASSERT_TRUE(raw_extractor->Extract(
+      raw_bitmap, &raw_keypoints, &raw_descriptors));
+  ASSERT_GT(raw_keypoints.size(), config.max_num_features);
+  ASSERT_EQ(raw_descriptors.data.rows(), raw_keypoints.size());
+
+  auto* extractor = CreateExtractor(config);
+  ASSERT_NE(extractor, nullptr);
+
+  const auto output1 = fixture.directory / "bounded-first.ckfeatures";
+  auto input1 = fixture.Input(output1);
+  auto result1 = MakeResult();
+  ASSERT_EQ(fixture.Run(extractor, &input1, &result1), COLMAPKIT_STATUS_OK)
+      << result1.message;
+  EXPECT_EQ(result1.feature_count, config.max_num_features);
+  EXPECT_EQ(result1.descriptor_bytes, config.max_num_features * 128u);
+
+  auto validated = MakeResult();
+  ASSERT_EQ(
+      Validate(
+          extractor, output1, fixture, result1.metadata_sha256, &validated),
+      COLMAPKIT_STATUS_OK)
+      << validated.message;
+  EXPECT_EQ(validated.feature_count, config.max_num_features);
+  EXPECT_EQ(validated.descriptor_bytes, config.max_num_features * 128u);
+
+  const auto output2 = fixture.directory / "bounded-second.ckfeatures";
+  auto input2 = fixture.Input(output2);
+  auto result2 = MakeResult();
+  ASSERT_EQ(fixture.Run(extractor, &input2, &result2), COLMAPKIT_STATUS_OK)
+      << result2.message;
+  EXPECT_EQ(ReadBytes(output1), ReadBytes(output2));
+  ColmapKitReleaseFrameFeatureExtractorV1(extractor);
+}
+
+TEST(FrameFeatureExtractionV1, AdmissionUsesHardTerminalRowBound) {
+  FrameFixture fixture;
+  auto config = DefaultConfig();
+  const uint64_t admitted =
+      ExpectedAdmissionBytes(config, fixture.metadata, fixture.encoded.size());
+
+  config.memory_admission_budget_bytes = admitted - 1;
+  auto* rejected_extractor = CreateExtractor(config);
+  ASSERT_NE(rejected_extractor, nullptr);
+  const auto rejected_output =
+      fixture.directory / "admission-rejected.ckfeatures";
+  auto rejected_input = fixture.Input(rejected_output);
+  ColmapKitFrameFeatureJobV1* rejected_job = nullptr;
+  auto error = MakeError();
+  EXPECT_EQ(ColmapKitStartFrameFeatureExtractionV1(
+                rejected_extractor, &rejected_input, &rejected_job, &error),
+            COLMAPKIT_STATUS_INVALID_ARGUMENT);
+  EXPECT_EQ(rejected_job, nullptr);
+  EXPECT_FALSE(std::filesystem::exists(rejected_output));
+  ColmapKitReleaseFrameFeatureExtractorV1(rejected_extractor);
+
+  config.memory_admission_budget_bytes = admitted;
+  auto* admitted_extractor = CreateExtractor(config);
+  ASSERT_NE(admitted_extractor, nullptr);
+  const auto admitted_output = fixture.directory / "admission-exact.ckfeatures";
+  auto admitted_input = fixture.Input(admitted_output);
+  auto result = MakeResult();
+  ASSERT_EQ(fixture.Run(admitted_extractor, &admitted_input, &result),
+            COLMAPKIT_STATUS_OK)
+      << result.message;
+  EXPECT_EQ(result.admitted_memory_bytes, admitted);
+  ColmapKitReleaseFrameFeatureExtractorV1(admitted_extractor);
+}
+
 TEST(FrameFeatureExtractionV1, ExtractsValidArtifactAndRepeatsByteIdentically) {
   FrameFixture fixture;
   const auto config = DefaultConfig();
@@ -327,6 +473,29 @@ TEST(FrameFeatureExtractionV1, RejectsCorruptionVersionsAndConfigurationDrift) {
       Validate(
           extractor, corrupt_path, fixture, extracted.metadata_sha256, &result),
       COLMAPKIT_STATUS_INVALID_ARGUMENT);
+
+  auto over_bound = original;
+  constexpr size_t kFeatureCountOffset = 196;
+  constexpr size_t kDescriptorBytesOffset = 204;
+  const uint64_t over_bound_count = config.max_num_features + 1;
+  const uint64_t over_bound_descriptor_bytes = over_bound_count * 128;
+  ASSERT_LE(kDescriptorBytesOffset + sizeof(uint64_t), over_bound.size());
+  std::memcpy(over_bound.data() + kFeatureCountOffset,
+              &over_bound_count,
+              sizeof(over_bound_count));
+  std::memcpy(over_bound.data() + kDescriptorBytesOffset,
+              &over_bound_descriptor_bytes,
+              sizeof(over_bound_descriptor_bytes));
+  const auto over_bound_path = fixture.directory / "over-bound.ckfeatures";
+  WriteBytes(over_bound_path, over_bound);
+  result = MakeResult();
+  EXPECT_EQ(Validate(extractor,
+                     over_bound_path,
+                     fixture,
+                     extracted.metadata_sha256,
+                     &result),
+            COLMAPKIT_STATUS_INVALID_ARGUMENT);
+  EXPECT_NE(std::string(result.message).find("counts"), std::string::npos);
 
   config.max_num_features += 1;
   auto* drifted_extractor = CreateExtractor(config);

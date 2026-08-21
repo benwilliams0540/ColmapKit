@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -359,6 +360,58 @@ TEST(FrameFeatureImportV1, CommitsOrderedDatabaseAndReceiptRepeatably) {
   EXPECT_STREQ(result1.sealed_set_sha256, result2.sealed_set_sha256);
   EXPECT_STREQ(result1.database_sha256, result2.database_sha256);
   EXPECT_STREQ(result1.receipt_sha256, result2.receipt_sha256);
+}
+
+TEST(FrameFeatureImportV1, ImportsExactTerminalFeatureRows) {
+  ImportFixture fixture;
+  fixture.extractor_config.max_num_features = 64;
+  const std::vector<ExtractedFrame> frames = {fixture.Extract(1, 1, 1)};
+  ASSERT_EQ(frames[0].feature_count, fixture.extractor_config.max_num_features);
+  auto items = fixture.Items(frames);
+  const std::string output = (fixture.directory / "bounded.ckseal").string();
+  auto config = fixture.Config(items, output);
+  auto result = MakeImportResult();
+  ASSERT_EQ(fixture.Run(&config, &result), COLMAPKIT_STATUS_OK)
+      << result.message;
+  EXPECT_EQ(result.imported_keypoints,
+            fixture.extractor_config.max_num_features);
+
+  auto database = Database::Open(std::filesystem::path(output) / "database.db");
+  EXPECT_EQ(database->ReadKeypoints(1).size(),
+            fixture.extractor_config.max_num_features);
+  const FeatureDescriptors descriptors = database->ReadDescriptors(1);
+  EXPECT_EQ(descriptors.data.rows(), fixture.extractor_config.max_num_features);
+  EXPECT_EQ(descriptors.data.cols(), 128);
+  database->Close();
+}
+
+TEST(FrameFeatureImportV1, RejectsArtifactAboveTerminalRowBound) {
+  ImportFixture fixture;
+  fixture.extractor_config.max_num_features = 64;
+  std::vector<ExtractedFrame> frames = {fixture.Extract(1, 1, 1)};
+  std::vector<uint8_t> artifact = ReadBytes(frames[0].artifact_path);
+  constexpr size_t kFeatureCountOffset = 196;
+  constexpr size_t kDescriptorBytesOffset = 204;
+  const uint64_t over_bound_count =
+      fixture.extractor_config.max_num_features + 1;
+  const uint64_t over_bound_descriptor_bytes = over_bound_count * 128;
+  ASSERT_LE(kDescriptorBytesOffset + sizeof(uint64_t), artifact.size());
+  std::memcpy(artifact.data() + kFeatureCountOffset,
+              &over_bound_count,
+              sizeof(over_bound_count));
+  std::memcpy(artifact.data() + kDescriptorBytesOffset,
+              &over_bound_descriptor_bytes,
+              sizeof(over_bound_descriptor_bytes));
+  WriteBytes(frames[0].artifact_path, artifact);
+  frames[0].artifact_sha256 = HashFile(frames[0].artifact_path);
+
+  auto items = fixture.Items(frames);
+  const std::string output = (fixture.directory / "over-bound.ckseal").string();
+  auto config = fixture.Config(items, output);
+  auto result = MakeImportResult();
+  EXPECT_EQ(fixture.Run(&config, &result), COLMAPKIT_STATUS_INVALID_ARGUMENT);
+  EXPECT_NE(std::string(result.message).find("counts"), std::string::npos);
+  EXPECT_FALSE(std::filesystem::exists(output));
 }
 
 struct BlockingImportProgress {

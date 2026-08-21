@@ -13,6 +13,12 @@ namespace colmap::internal {
 
 std::string FrameFeatureSHA256(std::string_view input);
 
+// Apply the FrameFeatureExtractionV1 hard terminal row cap while preserving
+// keypoint/descriptor alignment. Exact-bound payloads remain unchanged.
+void ApplyFrameFeatureTerminalRowLimitV1(uint32_t max_num_features,
+                                         FeatureKeypoints* keypoints,
+                                         FeatureDescriptors* descriptors);
+
 struct FrameFeatureArtifactDataV1 {
   ColmapKitFrameFeatureResultV1 result{};
   ColmapKitFrameMetadataV1 metadata{};
