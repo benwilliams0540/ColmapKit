@@ -515,24 +515,27 @@ SWIFT_CONSUMER
 
 swift_package_build() {
   local label="$1"
-  local destination="$2"
-  local derived_data="$SWIFT_PACKAGE_ROOT/derived-data-$label"
-  xcodebuild \
-    -scheme ColmapKitConsumer \
-    -destination "$destination" \
-    -derivedDataPath "$derived_data" \
-    ARCHS=arm64 \
-    ONLY_ACTIVE_ARCH=YES \
-    CODE_SIGNING_ALLOWED=NO \
-    build > "$SWIFT_PACKAGE_ROOT/$label.log" 2>&1
+  local triple="$2"
+  local sdk="$3"
+  swift build \
+    --package-path "$SWIFT_PACKAGE_ROOT" \
+    --scratch-path "$SWIFT_PACKAGE_ROOT/.build-$label" \
+    --triple "$triple" \
+    --sdk "$sdk" > "$SWIFT_PACKAGE_ROOT/$label.log" 2>&1
 }
 
-(
-  cd "$SWIFT_PACKAGE_ROOT"
-  swift_package_build macos-arm64 'generic/platform=macOS'
-  swift_package_build ios-arm64 'generic/platform=iOS'
-  swift_package_build ios-arm64-simulator 'generic/platform=iOS Simulator'
-)
+swift_package_build \
+  macos-arm64 \
+  "arm64-apple-macosx$MACOS_DEPLOYMENT_TARGET" \
+  "$(xcrun --sdk macosx --show-sdk-path)"
+swift_package_build \
+  ios-arm64 \
+  "arm64-apple-ios$IOS_DEPLOYMENT_TARGET" \
+  "$(xcrun --sdk iphoneos --show-sdk-path)"
+swift_package_build \
+  ios-arm64-simulator \
+  "arm64-apple-ios$IOS_DEPLOYMENT_TARGET-simulator" \
+  "$(xcrun --sdk iphonesimulator --show-sdk-path)"
 
 rm -f "$ZIP_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$XCFRAMEWORK_PATH" "$ZIP_PATH"
