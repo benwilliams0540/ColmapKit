@@ -240,12 +240,13 @@ rm -f "$NOTICE_INPUTS_RAW" "$NOTICE_INPUTS_SORTED"
 
 install_notice() {
   local framework="$1"
-  local resources="$framework/Resources"
   if [[ -d "$framework/Versions/A" ]]; then
-    resources="$framework/Versions/A/Resources"
+    local resources="$framework/Versions/A/Resources"
+    mkdir -p "$resources"
+    cp "$NOTICE_PATH" "$resources/$NOTICE_NAME"
+  else
+    cp "$NOTICE_PATH" "$framework/$NOTICE_NAME"
   fi
-  mkdir -p "$resources"
-  cp "$NOTICE_PATH" "$resources/$NOTICE_NAME"
 }
 
 install_notice "$MACOS_FRAMEWORK"
@@ -381,6 +382,10 @@ audit_framework() {
   if ! grep -Fq "platform $expected_platform" "$audit_path" ||
      ! grep -Fq "minos $expected_minos" "$audit_path"; then
     echo "error: $label has an unexpected platform or deployment target." >&2
+    exit 1
+  fi
+  if ! grep -Fq 'Info.plist entries=' "$audit_path"; then
+    echo "error: $label code signature does not bind its Info.plist." >&2
     exit 1
   fi
   if grep -E '^[[:space:]].*(/opt/homebrew|/usr/local|/opt/anaconda3|/private/tmp|/Users/|MacOSX)' <<< "$linkage_output" >/dev/null; then
