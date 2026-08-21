@@ -5,8 +5,6 @@ import SQLite3
 import UIKit
 @preconcurrency import ColmapKit
 
-private let expectedRelease = "0.3.0-rc.3+14eadc5c"
-private let expectedEngineCommit = "14eadc5c"
 private let admissionBudgetBytes: UInt64 = 320 * 1024 * 1024
 private let maximumFixtureAdmissionEstimateBytes: UInt64 = 325_534_076
 

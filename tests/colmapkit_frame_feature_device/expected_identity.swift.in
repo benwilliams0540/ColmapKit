@@ -1,0 +1,2 @@
+let expectedRelease = "@COLMAPKIT_EXPECTED_RELEASE@"
+let expectedEngineCommit = "@COLMAPKIT_EXPECTED_ENGINE_COMMIT@"

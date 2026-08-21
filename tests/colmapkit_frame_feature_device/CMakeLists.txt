@@ -8,7 +8,22 @@ foreach(required_variable COLMAPKIT_FRAMEWORK COLMAPKIT_FRAME_FEATURE_FIXTURE_DI
   endif()
 endforeach()
 
-add_executable(ColmapKitFrameFeatureDeviceHarness MACOSX_BUNDLE main.swift)
+if(NOT DEFINED COLMAPKIT_EXPECTED_RELEASE)
+  set(COLMAPKIT_EXPECTED_RELEASE "0.3.0-rc.3+14eadc5c")
+endif()
+if(NOT DEFINED COLMAPKIT_EXPECTED_ENGINE_COMMIT)
+  set(COLMAPKIT_EXPECTED_ENGINE_COMMIT "14eadc5c")
+endif()
+configure_file(
+  expected_identity.swift.in
+  "${CMAKE_CURRENT_BINARY_DIR}/expected_identity.swift"
+  @ONLY)
+
+add_executable(
+  ColmapKitFrameFeatureDeviceHarness
+  MACOSX_BUNDLE
+  main.swift
+  "${CMAKE_CURRENT_BINARY_DIR}/expected_identity.swift")
 target_link_libraries(
   ColmapKitFrameFeatureDeviceHarness
   PRIVATE "${COLMAPKIT_FRAMEWORK}" "-framework UIKit" sqlite3)
